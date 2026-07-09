@@ -1,0 +1,63 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function getUserDoc() {
+      return firestore.get(
+        /databases/(default)/documents/usuarios/$(request.auth.uid)
+      ).data;
+    }
+
+    function hasRole(roles) {
+      return isAuth() && getUserDoc().rol in roles;
+    }
+
+    function isAdminOrSupervisor() {
+      return hasRole(['admin', 'supervisor']);
+    }
+
+    function isActiveUser() {
+      return isAuth() && getUserDoc().activo == true;
+    }
+
+    function getUserSections() {
+      return getUserDoc().secciones;
+    }
+
+    // Path esperado:
+    // cartas_generadas/{campaignId}/{seccionKey}/{gestorUid}/{fileName}
+    match /cartas_generadas/{campaignId}/{seccionKey}/{gestorUid}/{fileName} {
+      allow write: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || request.auth.uid == gestorUid
+      )
+      && request.resource.size < 20 * 1024 * 1024
+      && (
+        request.resource.contentType.matches('image/.*')
+        || request.resource.contentType == 'application/pdf'
+        || request.resource.contentType
+          == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+      );
+      allow read: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || request.auth.uid == gestorUid
+        || (
+          getUserSections() is list
+          && seccionKey in getUserSections()
+        )
+      );
+    }
+
+    // Plantillas Word oficiales (admin escribe, gestores leen)
+    match /plantillas_carta/{fileName} {
+      allow read: if isActiveUser();
+      allow write: if isAdminOrSupervisor()
+        && request.resource.size < 10 * 1024 * 1024
+        && request.resource.contentType
+          == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    }
+  }
+}

@@ -1,0 +1,90 @@
+# Secrets / credentials — NEVER commit
+*.pem
+*.p12
+*firebase-adminsdk*.json
+**/serviceAccount*.json
+**/service-account*.json
+.env
+.env.*
+!.env.example
+# Client Firebase configs may be needed to build; keep them if present.
+# Admin SDK JSON is excluded via *firebase-adminsdk*.json above.
+**/credentials.json
+**/secrets/
+
+# Python
+.venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+admin-app/.venv/
+admin-app/.pytest_cache/
+
+# Node / frontend builds
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+.vite/
+**/.vite/
+gestor-app/dist/
+landing/dist/
+
+# Flutter / mobile builds
+flutter-app/build/
+flutter-app/.dart_tool/
+flutter-app/.flutter-plugins
+flutter-app/.flutter-plugins-dependencies
+flutter-app/.packages
+flutter-app/.pub-cache/
+flutter-app/.pub/
+**/android/.gradle/
+**/android/local.properties
+**/android/app/debug/
+**/android/app/profile/
+**/android/app/release/
+*.apk
+*.aab
+*.ipa
+*.symbols
+
+# Firebase local cache
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+*.log
+
+# Local / bulky / unrelated
+.agents/
+.cursor/
+AntCobra2/
+123/
+build/
+MUESTRA DE DATA.xlsx
+*.rar
+*.zip
+!flutter-app/**/*.zip
+
+# Local operational data (PII, SQLite, generated letters)
+admin-app/data/antcobranzas.db
+admin-app/data/*.db
+admin-app/data/publicaciones/
+admin-app/build_log.txt
+admin-app/dist/
+admin-app/dist_build/
+*.exe
+**/__pycache__/
+
+# Large sample / local docs dumps (keep repo lean)
+Análisis.docx
+Análisis.pdf

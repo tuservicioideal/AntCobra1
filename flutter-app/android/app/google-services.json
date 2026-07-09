@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "445584901998",
+    "project_id": "clase-001",
+    "storage_bucket": "clase-001.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:445584901998:android:f7a6ec3a7d55f13b9ee37f",
+        "android_client_info": {
+          "package_name": "com.fym.recaudolegal"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDt9ySU5WKPc5pUuwTdvEWcXjGbA2Xi9Wk"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

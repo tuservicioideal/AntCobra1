@@ -1,0 +1,17 @@
+{
+  "projects": {
+    "default": "clase-001"
+  },
+  "targets": {
+    "clase-001": {
+      "hosting": {
+        "landing": [
+          "clase-001"
+        ],
+        "gestores": [
+          "gestores-clase-001"
+        ]
+      }
+    }
+  }
+}

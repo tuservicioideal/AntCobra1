@@ -1,0 +1,28 @@
+# Recaudo Legal & Abogados E.I.R.L.
+
+> Recaudo Legal & Abogados es una empresa legal en Piura, Perú (RUC 20526060475, estado activo y habido), especializada en soluciones jurídicas y gestión de cobranza/recaudo de cartera.
+
+## Información principal
+
+- [Inicio](https://clase-001.web.app/#inicio): Página principal con presentación de la firma y servicios legales en Piura.
+- [Servicios](https://clase-001.web.app/#servicios): Recaudo de cartera, cobranza judicial y extrajudicial, asesoría legal y recuperación de derechos.
+- [Nosotros](https://clase-001.web.app/#nosotros): Descripción de la empresa, ubicación y enfoque profesional.
+- [Preguntas frecuentes](https://clase-001.web.app/#faq): Respuestas sobre servicios, proceso y registro legal.
+- [Contacto](https://clase-001.web.app/#contacto): Dirección, teléfonos, correo y mapa de ubicación.
+
+## Datos de contacto
+
+- Dirección: Cal. Moquegua 382 Int. 1, Piura, Piura, Piura, Perú
+- Teléfonos: +51 995 051 447, +51 945 559 579
+- Correo: recaudolegal@yahoo.com
+- RUC: 20526060475 (E.I.R.L., activo/habido)
+
+## Referencias externas
+
+- [Consulta RUC](https://ruc.pe/recaudo-legal-abogados-eirl/): Registro tributario oficial de la empresa.
+- [Sitio web corporativo](https://recaudolegalabogados.com/): Página web adicional de la firma.
+- [Directorio empresarial](https://www.universidadperu.com/empresas/recaudo-legal-abogados.php): Perfil en directorio peruano.
+
+## Sitemap
+
+- https://clase-001.web.app/sitemap.xml

@@ -1,0 +1,221 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helpers ──────────────────────────────────────────────
+    function isAuth() {
+      return request.auth != null;
+    }
+
+    function getUserDoc() {
+      return get(/databases/$(database)/documents/usuarios/$(request.auth.uid)).data;
+    }
+
+    function hasRole(roles) {
+      return isAuth() && getUserDoc().rol in roles;
+    }
+
+    function isAdminOrSupervisor() {
+      return hasRole(['admin', 'supervisor']);
+    }
+
+    function isActiveUser() {
+      return isAuth() && getUserDoc().activo == true;
+    }
+
+    function getUserSections() {
+      return getUserDoc().secciones;
+    }
+
+    // ── Usuarios ─────────────────────────────────────────────
+    // Lectura: cualquier usuario autenticado (perfil operativo).
+    // Alta / baja / privilegios: solo admin o supervisor.
+    // Auto-edición: solo campos de perfil no privilegiados (no rol, activo, secciones, canal).
+    match /usuarios/{userId} {
+      allow read: if isAuth();
+
+      allow create: if isAdminOrSupervisor();
+
+      allow delete: if isAdminOrSupervisor();
+
+      allow update: if isAdminOrSupervisor()
+        || (
+          isAuth()
+          && request.auth.uid == userId
+          && request.resource.data.rol == resource.data.rol
+          && request.resource.data.activo == resource.data.activo
+          && request.resource.data.secciones == resource.data.secciones
+          && request.resource.data.canal == resource.data.canal
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['nombre', 'telefono', 'email', 'zona', 'region'])
+        );
+    }
+
+    // ── Campañas ─────────────────────────────────────────────
+    // Campaign root docs: admin writes, all active auth reads
+    match /{campaignCollection}/{campaignId} {
+      allow read: if isActiveUser() && campaignCollection == 'campañas';
+      allow write: if isAdminOrSupervisor() && campaignCollection == 'campañas';
+
+      // Gestores sub-collection (section-level docs)
+      match /gestores/{seccionId} {
+        allow read: if isActiveUser() && campaignCollection == 'campañas';
+        allow write: if isAdminOrSupervisor() && campaignCollection == 'campañas';
+
+        // Clientes sub-collection
+        // Gestors can only update clients in THEIR assigned section.
+        // Admin/supervisor can write anything.
+        match /clientes/{clienteId} {
+          allow read: if isActiveUser() && campaignCollection == 'campañas';
+          allow create: if isAdminOrSupervisor() && campaignCollection == 'campañas';
+          allow update: if campaignCollection == 'campañas' && isActiveUser() && (
+            isAdminOrSupervisor()
+            || (
+              seccionId in getUserSections()
+              && !request.resource.data.diff(resource.data).affectedKeys()
+                .hasAny(['seccion', 'seccion_key', 'region', 'zona'])
+            )
+          );
+          allow delete: if isAdminOrSupervisor() && campaignCollection == 'campañas';
+
+          // Historial de cambios de contacto para trazabilidad completa.
+          match /historial_contacto/{histId} {
+            allow read: if isActiveUser() && campaignCollection == 'campañas';
+            allow create: if campaignCollection == 'campañas' && isActiveUser() && (
+              isAdminOrSupervisor()
+              || (seccionId in getUserSections())
+            );
+            allow update: if campaignCollection == 'campañas' && isActiveUser() && (
+              isAdminOrSupervisor()
+              || (
+                seccionId in getUserSections()
+                && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+                  'nivel_confianza', 'orden', 'oculto', 'es_principal',
+                  'nota', 'fecha', 'fecha_evento'
+                ])
+              )
+            );
+            allow delete: if isAdminOrSupervisor() && campaignCollection == 'campañas';
+          }
+
+          // Historial append-only de visitas / gestiones de cobranza.
+          match /historial_visitas/{visitaId} {
+            allow read: if isActiveUser() && campaignCollection == 'campañas';
+            allow create: if campaignCollection == 'campañas' && isActiveUser() && (
+              isAdminOrSupervisor()
+              || (seccionId in getUserSections())
+            );
+            allow update: if false;
+            allow delete: if isAdminOrSupervisor() && campaignCollection == 'campañas';
+          }
+        }
+      }
+    }
+
+    // ── Alertas ──────────────────────────────────────────────
+    // Any active authenticated user can create alerts.
+    // Admin/supervisor/asistente can read alerts.
+    // Only admin/supervisor can update (mark as reviewed).
+    match /alertas/{alertId} {
+      allow create: if isActiveUser();
+      allow read: if isActiveUser() && hasRole(['admin', 'supervisor', 'asistente']);
+      allow update: if isAdminOrSupervisor();
+      allow delete: if isAdminOrSupervisor();
+    }
+
+    // ── Notificaciones (Base Updates → Gestores) ─────────────
+    // Admin creates notifications; gestores read their own and mark as read.
+    match /notificaciones/{notifId} {
+      allow create: if isAdminOrSupervisor();
+      allow read: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || resource.data.destinatario_uid == request.auth.uid
+      );
+      allow update: if isActiveUser() && (
+        // Gestores can only mark as read
+        (resource.data.destinatario_uid == request.auth.uid
+         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['leida'])
+         && request.resource.data.leida == true)
+        || isAdminOrSupervisor()
+      );
+    }
+
+    // ── Cartas Generadas (JPG para gestores) ────────────────────
+    // Admin/supervisor publica metadatos de cartas.
+    // Gestores leen solo cartas asignadas por uid o por secciones.
+    match /cartas_generadas/{cartaId} {
+      allow create, update: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || (
+          request.resource.data.gestor_uid == request.auth.uid
+          && request.resource.data.source_mode == 'client_fallback'
+          && request.resource.data.mime_type.matches('image/.*')
+        )
+      );
+      allow delete: if isAdminOrSupervisor();
+      allow read: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || resource.data.gestor_uid == request.auth.uid
+        || (
+          resource.data.seccion_key is string
+          && resource.data.seccion_key in getUserSections()
+        )
+      );
+    }
+
+    // ── Ubicaciones de Gestores (GPS Tracking) ───────────────
+    // Gestors write their own location points.
+    // Admin/supervisor can read all tracking data.
+    match /ubicaciones_gestores/{odId} {
+      allow read: if isAdminOrSupervisor();
+      allow write: if isActiveUser() && request.auth.uid == odId;
+
+      match /puntos/{puntoId} {
+        allow read: if isAdminOrSupervisor();
+        allow create: if isActiveUser() && request.auth.uid == odId;
+      }
+    }
+
+    // ── Estructura Territorial (Catálogo Región→Zona→Sección) ─
+    // All active users can read the catalog.
+    // Only admin/supervisor can write (generated from Excel upload).
+    match /estructura_territorial/{docId} {
+      allow read: if isActiveUser();
+      allow write: if isAdminOrSupervisor();
+    }
+
+    // ── Configuración (Catálogos, Niveles, Parámetros) ──────
+    // All active users can read configuration.
+    // Only admin/supervisor can write.
+    match /configuracion/{docId} {
+      allow read: if isActiveUser();
+      allow write: if isAdminOrSupervisor();
+    }
+
+    // ── Rutas Diarias (Route Planning) ───────────────────────
+    // Gestors create/update their own routes (doc ID = date_uid).
+    // Admin/supervisor can read all routes.
+    match /rutas_diarias/{rutaId} {
+      function isOwnRouteById() {
+        return rutaId.matches('^.+_' + request.auth.uid + '$');
+      }
+      allow read: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || isOwnRouteById()
+        || resource.data.gestor_uid == request.auth.uid
+      );
+      allow create: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || request.resource.data.gestor_uid == request.auth.uid
+      );
+      allow update: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || resource.data.gestor_uid == request.auth.uid
+      );
+      allow delete: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || resource.data.gestor_uid == request.auth.uid
+      );
+    }
+  }
+}

@@ -1,0 +1,97 @@
+@import "tailwindcss";
+
+/* ── Theme tokens ─────────────────────────────────────── */
+@theme {
+  --color-primary: #4f46e5;
+  --color-bg: #f9fafb;
+  --color-text: #111827;
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+
+/* ── Base layer — same cascade priority as Tailwind preflight ── */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    /* scroll-behavior: smooth eliminado — causa artefactos visuales (texto "estirado")
+       durante scroll rápido con rueda del ratón en Chromium/Windows */
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #f1f5f9;
+    color: var(--color-text);
+    min-height: 100vh;
+    line-height: 1.5;
+    /* Evita el efecto rubber-band y trabajo extra del browser al llegar al borde */
+    overscroll-behavior: none;
+  }
+
+  #root {
+    min-height: 100vh;
+    isolation: isolate;
+  }
+}
+
+/* ── Animación de entrada para cambios de módulo ── */
+@keyframes page-enter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.page-enter {
+  animation: page-enter 0.18s ease-out forwards;
+}
+
+@layer components {
+  .app-page {
+    @apply min-h-screen bg-slate-50;
+  }
+
+  .app-topbar {
+    @apply sticky top-0 z-30 bg-white border-b border-slate-200 shadow-sm;
+  }
+
+  .app-topbar-inner {
+    @apply max-w-7xl mx-auto px-4 py-3 flex items-center justify-between gap-3;
+  }
+
+  .app-topbar-title {
+    @apply text-base sm:text-lg font-extrabold tracking-tight text-slate-900;
+  }
+
+  .app-topbar-subtitle {
+    @apply text-xs text-slate-500 font-medium;
+  }
+
+  .app-icon-chip {
+    @apply w-9 h-9 rounded-xl bg-indigo-50 text-indigo-600 border border-indigo-100 flex items-center justify-center shrink-0;
+  }
+
+  .app-back-btn {
+    @apply p-2 rounded-xl border border-slate-200 text-slate-500 hover:text-slate-700 hover:bg-slate-50 transition-all;
+  }
+
+  .app-card {
+    @apply bg-white rounded-xl border border-slate-200 shadow-sm;
+  }
+}
+
+/* ── Scrollbar (unlayered is fine — doesn't conflict with utilities) ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d1d5db; border-radius: 10px; }
+::-webkit-scrollbar-thumb:hover { background: #9ca3af; }

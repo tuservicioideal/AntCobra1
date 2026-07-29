@@ -1,26 +1,35 @@
 # Recaudo Legal & Abogados E.I.R.L.
 
-> Recaudo Legal & Abogados es una empresa legal en Piura, Perú (RUC 20526060475, estado activo y habido), especializada en soluciones jurídicas y gestión de cobranza/recaudo de cartera.
+> Recaudo Legal & Abogados E.I.R.L. es una empresa peruana de Piura (RUC 20526060475, activo y habido) especializada en cobranza extrajudicial y judicial. Su titular gerente, Marco A. Acosta A., brinda el servicio de cobranza desde agosto de 1992.
 
 ## Información principal
 
-- [Inicio](https://clase-001.web.app/#inicio): Página principal con presentación de la firma y servicios legales en Piura.
-- [Servicios](https://clase-001.web.app/#servicios): Recaudo de cartera, cobranza judicial y extrajudicial, asesoría legal y recuperación de derechos.
-- [Nosotros](https://clase-001.web.app/#nosotros): Descripción de la empresa, ubicación y enfoque profesional.
-- [Preguntas frecuentes](https://clase-001.web.app/#faq): Respuestas sobre servicios, proceso y registro legal.
-- [Contacto](https://clase-001.web.app/#contacto): Dirección, teléfonos, correo y mapa de ubicación.
+- [Inicio](https://clase-001.web.app/#inicio): Presentación de la empresa y respaldo registral.
+- [Servicios](https://clase-001.web.app/#servicios): Cobranza extrajudicial, cobranza judicial, gestión y recaudo de cartera, asesoría legal para empresas.
+- [Trayectoria](https://clase-001.web.app/#trayectoria): Historia desde 1992 (persona natural), 2003 (A y C Nort E.I.R.L.) y 2017 (Recaudo Legal & Abogados E.I.R.L.).
+- [Cliente destacado](https://clase-001.web.app/#cliente): CETCO S.A. (RUC 20100123763), distribuidora de ésika, L'BEL y Cyzone, atendida desde 2003.
+- [Cobertura](https://clase-001.web.app/#cobertura): Tumbes, Piura, Lambayeque, La Libertad, Cajamarca, Áncash, San Martín y Loreto; objetivo: cobertura nacional.
+- [Preguntas frecuentes](https://clase-001.web.app/#faq): Servicios, cobertura, experiencia y registro legal.
+- [Contacto](https://clase-001.web.app/#contacto): Dirección fiscal, teléfono, correo y mapa.
+
+## Datos registrales
+
+- Razón social: Recaudo Legal & Abogados E.I.R.L.
+- RUC: 20526060475 (activo y habido)
+- Partida Registral: Nº 11090609 de Piura
+- Registro REMYPE: Nº 0000354940-2017 (15 de diciembre de 2017)
+- Actividad principal: cobranza extrajudicial y judicial
+- Titular Gerente: Marco A. Acosta A.
 
 ## Datos de contacto
 
-- Dirección: Cal. Moquegua 382 Int. 1, Piura, Piura, Piura, Perú
-- Teléfonos: +51 995 051 447, +51 945 559 579
+- Dirección fiscal: Urbanización Piura Mza. C4 Lte. 04, III Etapa, Piura, Piura, Piura, Perú
+- Teléfono / WhatsApp: +51 995 051 447
 - Correo: recaudolegal@yahoo.com
-- RUC: 20526060475 (E.I.R.L., activo/habido)
 
 ## Referencias externas
 
-- [Consulta RUC](https://ruc.pe/recaudo-legal-abogados-eirl/): Registro tributario oficial de la empresa.
-- [Sitio web corporativo](https://recaudolegalabogados.com/): Página web adicional de la firma.
+- [Consulta RUC](https://ruc.pe/recaudo-legal-abogados-eirl/): Registro tributario de la empresa.
 - [Directorio empresarial](https://www.universidadperu.com/empresas/recaudo-legal-abogados.php): Perfil en directorio peruano.
 
 ## Sitemap

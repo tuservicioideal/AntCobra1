@@ -69,6 +69,57 @@
     });
   }
 
+  // Animated counters
+  const counters = document.querySelectorAll(".counter");
+
+  if (counters.length && "IntersectionObserver" in window) {
+    const prefersReduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    function animateCounter(el) {
+      const target = parseInt(el.getAttribute("data-target"), 10);
+      if (isNaN(target)) return;
+
+      if (prefersReduced) {
+        el.textContent = String(target);
+        return;
+      }
+
+      const duration = 1600;
+      const start = performance.now();
+
+      function tick(now) {
+        const progress = Math.min((now - start) / duration, 1);
+        const eased = 1 - Math.pow(1 - progress, 3);
+        el.textContent = String(Math.round(eased * target));
+        if (progress < 1) {
+          requestAnimationFrame(tick);
+        }
+      }
+
+      requestAnimationFrame(tick);
+    }
+
+    const counterObserver = new IntersectionObserver(
+      function (entries) {
+        entries.forEach(function (entry) {
+          if (entry.isIntersecting) {
+            animateCounter(entry.target);
+            counterObserver.unobserve(entry.target);
+          }
+        });
+      },
+      { threshold: 0.4 }
+    );
+
+    counters.forEach(function (el) {
+      counterObserver.observe(el);
+    });
+  } else {
+    counters.forEach(function (el) {
+      el.textContent = el.getAttribute("data-target");
+    });
+  }
+
   // FAQ: only one open at a time (optional UX)
   const faqItems = document.querySelectorAll(".faq-item");
 

@@ -155,18 +155,13 @@ ul {
 }
 
 .logo-icon {
-  width: 44px;
-  height: 44px;
+  width: 48px;
+  height: 48px;
   border-radius: 10px;
-  background: var(--navy-900);
-  display: grid;
-  place-items: center;
-  color: var(--gold-500);
-}
-
-.logo-icon svg {
-  width: 24px;
-  height: 24px;
+  object-fit: contain;
+  background: var(--white);
+  box-shadow: 0 1px 4px rgba(15, 40, 71, 0.12);
+  flex-shrink: 0;
 }
 
 .logo-text {
@@ -1238,7 +1233,22 @@ section {
 .footer-brand .logo-name {
   color: var(--white);
   font-size: 1.25rem;
+  margin-bottom: 0;
+}
+
+.footer-logo {
+  display: flex;
+  align-items: center;
+  gap: 14px;
   margin-bottom: 16px;
+}
+
+.footer-logo img {
+  width: 48px;
+  height: 48px;
+  border-radius: 10px;
+  background: var(--white);
+  object-fit: contain;
 }
 
 .footer-brand p {
@@ -1255,6 +1265,11 @@ section {
   border-radius: var(--radius-sm);
   font-size: 0.8125rem;
   color: var(--gold-400);
+}
+
+.footer-login {
+  display: inline-flex;
+  margin-top: 20px;
 }
 
 .footer-col h4 {

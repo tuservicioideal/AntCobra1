@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../config/theme.dart';
 import '../models/client_model.dart';
+import 'consulta_telegram_screen.dart';
 import '../services/alert_service.dart';
 import '../services/firestore_service.dart';
 import '../services/document_download_service.dart';
@@ -800,6 +801,23 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
             icon: const Icon(Icons.arrow_back_ios, color: Colors.white),
             onPressed: () => Navigator.pop(context, _updated),
           ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.travel_explore, color: Colors.white),
+              tooltip: 'Consultar por Telegram',
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => ConsultaTelegramScreen(
+                      initialClient: _client,
+                      campaignId: widget.campaignId,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
         ),
         body: body,
       ),

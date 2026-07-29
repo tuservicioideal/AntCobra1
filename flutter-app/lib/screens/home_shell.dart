@@ -10,6 +10,7 @@ import '../services/sync_status_service.dart';
 import '../services/location_service.dart';
 import '../services/tracking_service.dart';
 import 'admin_dashboard_screen.dart';
+import 'consulta_telegram_screen.dart';
 import 'dashboard_screen.dart';
 import 'stats_screen.dart';
 import 'client_map_screen.dart';
@@ -178,6 +179,12 @@ class _HomeShellState extends State<HomeShell> {
           screen: DashboardScreen(),
         ),
         const _TabItem(
+          icon: Icons.travel_explore_outlined,
+          activeIcon: Icons.travel_explore,
+          label: 'Consultas',
+          screen: ConsultaTelegramScreen(),
+        ),
+        const _TabItem(
           icon: Icons.person_outline,
           activeIcon: Icons.person,
           label: 'Perfil',
@@ -204,6 +211,12 @@ class _HomeShellState extends State<HomeShell> {
           activeIcon: Icons.route,
           label: 'Mis rutas',
           screen: MyRoutesScreen(key: _myRoutesKey),
+        ),
+        const _TabItem(
+          icon: Icons.travel_explore_outlined,
+          activeIcon: Icons.travel_explore,
+          label: 'Consultas',
+          screen: ConsultaTelegramScreen(),
         ),
         const _TabItem(
           icon: Icons.person_outline,

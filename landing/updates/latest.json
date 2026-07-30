@@ -1,0 +1,10 @@
+{
+  "version": "1.0.22",
+  "filename": "Cobranzas-Setup-1.0.22.exe",
+  "url": "https://clase-001.web.app/updates/Cobranzas-Setup-1.0.22.zip",
+  "sha256": "85d3edbf17dd4dd04332adbb128c505163269ce1998c7cfcfcaedcb80e016c10",
+  "notes": "Agente IA WhatsApp con auto-respuesta (OpenRouter/Groq/Gemini), badge IA/humano en el inbox, handoff al responder manualmente y diagnostico del webhook Meta.",
+  "min_version": "1.0.22",
+  "published_at": "2026-07-30T16:50:59Z",
+  "package": "Cobranzas-Setup-1.0.22.zip"
+}

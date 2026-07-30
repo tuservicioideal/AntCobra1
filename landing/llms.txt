@@ -10,7 +10,9 @@
 - [Cliente destacado](https://clase-001.web.app/#cliente): CETCO S.A. (RUC 20100123763), distribuidora de ésika, L'BEL y Cyzone, atendida desde 2003.
 - [Cobertura](https://clase-001.web.app/#cobertura): Tumbes, Piura, Lambayeque, La Libertad, Cajamarca, Áncash, San Martín y Loreto; objetivo: cobertura nacional.
 - [Preguntas frecuentes](https://clase-001.web.app/#faq): Servicios, cobertura, experiencia y registro legal.
-- [Contacto](https://clase-001.web.app/#contacto): Dirección fiscal, teléfono, correo y mapa.
+- [Contacto](https://recaudolegal.com/#contacto): Dirección fiscal, teléfono, correo y mapa.
+- [Política de privacidad](https://recaudolegal.com/privacidad): Tratamiento de datos personales (Ley 29733).
+- [Eliminación de datos](https://recaudolegal.com/eliminacion-datos): Cómo solicitar el borrado de datos de usuario.
 
 ## Datos registrales
 
@@ -34,4 +36,4 @@
 
 ## Sitemap
 
-- https://clase-001.web.app/sitemap.xml
+- https://recaudolegal.com/sitemap.xml

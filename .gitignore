@@ -31,6 +31,10 @@ dist/
 **/.vite/
 gestor-app/dist/
 landing/dist/
+# Instaladores de Recaudo Legal Voz (se publican en Hosting /updates/)
+landing/updates/*.zip
+landing/updates/*.exe
+!landing/updates/latest.json
 
 # Flutter / mobile builds
 flutter-app/build/

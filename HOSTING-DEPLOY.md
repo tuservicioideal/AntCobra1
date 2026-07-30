@@ -78,3 +78,13 @@ Los gestores en calle deben usar la **APK** (`flutter build apk --release`) para
 - [ ] Mapa embebido carga correctamente
 - [ ] `llms.txt` y `sitemap.xml` accesibles en la raíz
 - [ ] JSON-LD válido (LegalService + FAQPage)
+- [ ] `/privacidad` y `/eliminacion-datos` cargan (URLs para Meta / WhatsApp)
+
+## URLs legales (Meta / publicación)
+
+| Uso | URL canónica |
+|-----|----------------|
+| Política de privacidad | https://recaudolegal.com/privacidad |
+| Eliminación de datos de usuario | https://recaudolegal.com/eliminacion-datos |
+
+Alternativas en el hosting Firebase: `https://clase-001.web.app/privacidad` y `https://clase-001.web.app/eliminacion-datos`.

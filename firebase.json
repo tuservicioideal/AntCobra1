@@ -28,6 +28,16 @@
         "**/.*",
         "**/node_modules/**"
       ],
+      "rewrites": [
+        {
+          "source": "/privacidad",
+          "destination": "/privacidad.html"
+        },
+        {
+          "source": "/eliminacion-datos",
+          "destination": "/eliminacion-datos.html"
+        }
+      ],
       "headers": [
         {
           "source": "**/*.@(css|js|webp|png|svg|jpg|jpeg|woff2)",

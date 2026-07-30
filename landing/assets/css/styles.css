@@ -1769,3 +1769,144 @@ section {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* —— Páginas legales (privacidad / eliminación de datos) —— */
+.legal-page .site-header {
+  background: rgba(250, 248, 244, 0.96);
+  border-bottom: 1px solid var(--cream-200);
+  box-shadow: var(--shadow-sm);
+}
+
+.legal-page .header-cta-solo {
+  display: inline-flex;
+  margin-left: auto;
+}
+
+.legal-main {
+  padding: calc(var(--header-h) + 48px) 0 72px;
+  min-height: 70vh;
+}
+
+.legal-wrap {
+  max-width: 46rem;
+}
+
+.legal-hero {
+  margin-bottom: 2.5rem;
+}
+
+.legal-meta {
+  margin-top: 1rem;
+  color: var(--charcoal-soft);
+  font-size: 0.95rem;
+}
+
+.legal-body {
+  display: grid;
+  gap: 2rem;
+}
+
+.legal-body section {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.legal-body h2 {
+  font-family: var(--font-display);
+  font-size: 1.35rem;
+  color: var(--navy-900);
+}
+
+.legal-body h3 {
+  font-size: 1.05rem;
+  color: var(--navy-800);
+  margin-top: 0.35rem;
+}
+
+.legal-body p,
+.legal-body li {
+  color: var(--charcoal);
+  font-size: 0.98rem;
+}
+
+.legal-body ul,
+.legal-body ol {
+  display: grid;
+  gap: 0.45rem;
+  padding-left: 1.25rem;
+}
+
+.legal-body ul {
+  list-style: disc;
+}
+
+.legal-body ol {
+  list-style: decimal;
+}
+
+.legal-body a {
+  color: var(--navy-700);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.legal-body a:hover {
+  color: var(--gold-500);
+}
+
+.legal-callout {
+  margin-top: 0.5rem;
+  padding: 1.25rem 1.35rem;
+  background: var(--cream-100);
+  border: 1px solid var(--cream-200);
+  border-radius: var(--radius-md);
+  display: grid;
+  gap: 0.85rem;
+}
+
+.legal-pre {
+  margin: 0;
+  padding: 1rem;
+  background: var(--navy-950);
+  color: rgba(255, 255, 255, 0.88);
+  border-radius: var(--radius-sm);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  overflow-x: auto;
+  white-space: pre-wrap;
+}
+
+.legal-nav-links {
+  margin-top: 3rem;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--cream-200);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 1rem;
+  font-weight: 600;
+}
+
+.legal-nav-links a {
+  color: var(--navy-800);
+}
+
+.legal-nav-links a:hover {
+  color: var(--gold-500);
+}
+
+.legal-footer-simple {
+  margin: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
+@media (max-width: 800px) {
+  .legal-page .main-nav {
+    display: none;
+  }
+
+  .legal-main {
+    padding-top: calc(var(--header-h) + 28px);
+  }
+}

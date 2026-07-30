@@ -4,7 +4,6 @@
   const header = document.querySelector(".site-header");
   const navToggle = document.querySelector(".nav-toggle");
   const mainNav = document.querySelector(".main-nav");
-  const navLinks = document.querySelectorAll(".nav-links a");
 
   // Header scroll effect
   function onScroll() {
@@ -20,19 +19,45 @@
 
   // Mobile nav toggle
   if (navToggle && mainNav) {
+    function closeNav() {
+      navToggle.setAttribute("aria-expanded", "false");
+      mainNav.classList.remove("open");
+      document.body.style.overflow = "";
+    }
+
+    function openNav() {
+      navToggle.setAttribute("aria-expanded", "true");
+      mainNav.classList.add("open");
+      document.body.style.overflow = "hidden";
+    }
+
     navToggle.addEventListener("click", function () {
       const expanded = navToggle.getAttribute("aria-expanded") === "true";
-      navToggle.setAttribute("aria-expanded", String(!expanded));
-      mainNav.classList.toggle("open");
-      document.body.style.overflow = expanded ? "" : "hidden";
+      if (expanded) {
+        closeNav();
+      } else {
+        openNav();
+      }
     });
 
-    navLinks.forEach(function (link) {
-      link.addEventListener("click", function () {
-        navToggle.setAttribute("aria-expanded", "false");
-        mainNav.classList.remove("open");
-        document.body.style.overflow = "";
-      });
+    mainNav.querySelectorAll("a").forEach(function (link) {
+      link.addEventListener("click", closeNav);
+    });
+
+    window.addEventListener(
+      "resize",
+      function () {
+        if (window.innerWidth > 1100 && mainNav.classList.contains("open")) {
+          closeNav();
+        }
+      },
+      { passive: true }
+    );
+
+    document.addEventListener("keydown", function (event) {
+      if (event.key === "Escape" && mainNav.classList.contains("open")) {
+        closeNav();
+      }
     });
   }
 

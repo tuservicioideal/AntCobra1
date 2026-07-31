@@ -166,6 +166,11 @@ String mapUserAdminError(Object error) {
   if (message.contains('not-found') || message.contains('NOT_FOUND')) {
     return 'Función no disponible. Despliega Cloud Functions (createGestorUser).';
   }
+  if (message.contains('deadline-exceeded') ||
+      message.contains('TimeoutException') ||
+      message.contains('timed out')) {
+    return 'La operación tardó demasiado. Revisa tu conexión e intenta de nuevo.';
+  }
   if (message.contains('invalid-argument')) {
     final match = RegExp(r'message:\s*(.+?)(?:,|\])').firstMatch(message);
     if (match != null) return match.group(1)!.trim();

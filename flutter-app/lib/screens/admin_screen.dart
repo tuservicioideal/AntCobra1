@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:provider/provider.dart';
@@ -805,6 +806,7 @@ class _AdminScreenState extends State<AdminScreen> {
                       availableSectionKeys: _availableSections,
                       initialSecciones: selectedSecciones,
                       onSeccionesChanged: (keys) {
+                        if (listEquals(selectedSecciones, keys)) return;
                         setDialogState(() => selectedSecciones = keys);
                       },
                     ),

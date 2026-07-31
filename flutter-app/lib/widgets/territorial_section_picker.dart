@@ -47,7 +47,12 @@ class _TerritorialSectionPickerState extends State<TerritorialSectionPicker> {
   void initState() {
     super.initState();
     _applyInitialKey(widget.initialCompositeKey);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _notifySelection());
+    // Notify once after first frame so parents sync empty/initial selection
+    // without coupling to rebuild identity of list/callback props.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _notifySelection();
+    });
   }
 
   @override
@@ -55,7 +60,7 @@ class _TerritorialSectionPickerState extends State<TerritorialSectionPicker> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.initialCompositeKey != widget.initialCompositeKey) {
       _applyInitialKey(widget.initialCompositeKey);
-      _notifySelection();
+      // Parent already owns the new key; do not re-emit and risk setState loops.
     }
   }
 

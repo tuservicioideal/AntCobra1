@@ -34,7 +34,10 @@ class UserAdminService {
     );
 
     try {
-      final callable = _functions.httpsCallable('createGestorUser');
+      final callable = _functions.httpsCallable(
+        'createGestorUser',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+      );
       final result = await callable.call<Map<String, dynamic>>({
         'email': email.trim().toLowerCase(),
         'password': password,
@@ -71,7 +74,10 @@ class UserAdminService {
     }
 
     try {
-      final callable = _functions.httpsCallable('updateGestorUser');
+      final callable = _functions.httpsCallable(
+        'updateGestorUser',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+      );
       await callable.call<Map<String, dynamic>>({
         'uid': uid,
         'updates': payload,
@@ -84,7 +90,10 @@ class UserAdminService {
 
   Future<void> deleteGestorUser(String uid) async {
     try {
-      final callable = _functions.httpsCallable('deleteGestorUser');
+      final callable = _functions.httpsCallable(
+        'deleteGestorUser',
+        options: HttpsCallableOptions(timeout: const Duration(seconds: 30)),
+      );
       await callable.call<Map<String, dynamic>>({'uid': uid});
     } catch (e, st) {
       debugPrint('deleteGestorUser error: $e\n$st');

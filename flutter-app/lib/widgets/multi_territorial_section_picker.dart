@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../utils/territorial_utils.dart';
@@ -32,15 +33,17 @@ class _MultiTerritorialSectionPickerState
   void initState() {
     super.initState();
     _selectedKeys = List<String>.from(widget.initialSecciones);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _notify());
+    // Do not notify the parent on init. Emitting a new List instance here
+    // makes parents that store it and rebuild (e.g. StatefulBuilder dialogs)
+    // see `initialSecciones !=` forever and freeze the UI.
   }
 
   @override
   void didUpdateWidget(MultiTerritorialSectionPicker oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.initialSecciones != widget.initialSecciones) {
+    if (!listEquals(oldWidget.initialSecciones, widget.initialSecciones)) {
       _selectedKeys = List<String>.from(widget.initialSecciones);
-      _notify();
+      // Sync from parent only; do not re-emit — parent already owns this value.
     }
   }
 
@@ -99,6 +102,7 @@ class _MultiTerritorialSectionPickerState
             required zona,
             required seccionLetter,
           }) {
+            if (_pendingKey == compositeKey) return;
             setState(() => _pendingKey = compositeKey);
           },
         ),

@@ -820,21 +820,28 @@ class FirebaseService:
             return {"uid": None, "success": False, "error": str(e)}
     
     def list_gestor_users(self) -> list:
-        """List all gestor users from Firestore, deduplicating by UID."""
+        """List all users from Firestore, deduplicating by UID.
+
+        Prefers the canonical document (`usuarios/{uid}` where doc id == uid)
+        over legacy email-keyed duplicates so admin/supervisor roles are not
+        overwritten by an older gestor profile.
+        """
         if not self._initialized:
             return []
         try:
-            docs = self.db.collection("usuarios").stream()
-            seen_uids: set = set()
-            result = []
-            for d in docs:
+            by_uid: dict = {}
+            for d in self.db.collection("usuarios").stream():
                 data = {"id": d.id, **d.to_dict()}
                 uid = data.get("uid") or d.id
-                if uid in seen_uids:
+                is_canonical = d.id == uid
+                existing = by_uid.get(uid)
+                if existing is None:
+                    by_uid[uid] = data
                     continue
-                seen_uids.add(uid)
-                result.append(data)
-            return result
+                existing_canonical = existing.get("id") == uid
+                if is_canonical and not existing_canonical:
+                    by_uid[uid] = data
+            return list(by_uid.values())
         except Exception:
             return []
 

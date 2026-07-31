@@ -40,7 +40,7 @@ class AuthResult:
         self.activo = activo
         self.error = error
 
-    # Role helpers (same as Flutter/Web)
+    // Role helpers (same as Flutter/Web)
     @property
     def can_manage_users(self) -> bool:
         return self.rol in ("admin", "supervisor")
@@ -64,7 +64,7 @@ class AuthResult:
             "supervisor": "Supervisor",
             "asistente": "Asistente",
             "gestor": "Gestor",
-        }.get(self.rol, self.rol.capitalize())
+        }.get(self.rol, self.rol.capitalize() if self.rol else "Sin rol")
 
 
 class AuthService:
@@ -139,10 +139,23 @@ class AuthService:
         # ── Step 2: Load user profile from Firestore ──
         profile = self._load_profile(uid, email, firebase_service)
 
+        if profile is None:
+            return AuthResult(
+                success=False, uid=uid, email=email,
+                error="Tu perfil no está configurado. Contacte al administrador."
+            )
+
         if not profile.get("activo", True):
             return AuthResult(
                 success=False, uid=uid, email=email,
                 error="Cuenta desactivada. Contacte al administrador."
+            )
+
+        rol = (profile.get("rol") or "").strip()
+        if not rol:
+            return AuthResult(
+                success=False, uid=uid, email=email,
+                error="Tu perfil no tiene rol asignado. Contacte al administrador."
             )
 
         result = AuthResult(
@@ -150,7 +163,7 @@ class AuthService:
             uid=uid,
             email=email,
             nombre=profile.get("nombre", email),
-            rol=profile.get("rol", "gestor"),
+            rol=rol,
             seccion=profile.get("seccion", ""),
             telefono=profile.get("telefono", ""),
             zona=profile.get("zona", ""),
@@ -161,23 +174,43 @@ class AuthService:
         self.current_user = result
         return result
 
-    def _load_profile(self, uid: str, email: str, firebase_service) -> dict:
+    def _load_profile(self, uid: str, email: str, firebase_service) -> dict | None:
         """
         Multi-source profile resolution (same as Flutter/Web):
-        1. Try usuarios/{uid}
+        1. Try usuarios/{uid} (canonical — always preferred)
         2. Query by email field
         3. Try email-derived doc ID
+
+        Syncs legacy docs to usuarios/{uid} via Admin SDK when found.
+        Returns None if no profile exists (never invents rol=gestor).
         """
         if firebase_service is None or not firebase_service.is_initialized():
-            return {"nombre": email, "rol": "gestor", "activo": True}
+            return None
 
         db = firebase_service.db
+
+        def _sync_canonical(data: dict) -> dict:
+            payload = {**data, "uid": uid, "email": email}
+            if "activo" not in payload:
+                payload["activo"] = True
+            try:
+                db.collection("usuarios").document(uid).set(payload, merge=True)
+            except Exception:
+                pass
+            return payload
 
         # 1. Try canonical UID doc
         try:
             doc = db.collection("usuarios").document(uid).get()
             if doc.exists:
-                return doc.to_dict()
+                data = doc.to_dict() or {}
+                if not data.get("uid"):
+                    try:
+                        db.collection("usuarios").document(uid).update({"uid": uid})
+                    except Exception:
+                        pass
+                    data["uid"] = uid
+                return data
         except Exception:
             pass
 
@@ -185,13 +218,7 @@ class AuthService:
         try:
             query = db.collection("usuarios").where("email", "==", email).limit(1).stream()
             for d in query:
-                data = d.to_dict()
-                # Auto-sync to canonical UID doc
-                try:
-                    db.collection("usuarios").document(uid).set(data, merge=True)
-                except Exception:
-                    pass
-                return data
+                return _sync_canonical(d.to_dict() or {})
         except Exception:
             pass
 
@@ -200,18 +227,11 @@ class AuthService:
         try:
             doc = db.collection("usuarios").document(email_key).get()
             if doc.exists:
-                data = doc.to_dict()
-                # Auto-sync
-                try:
-                    db.collection("usuarios").document(uid).set(data, merge=True)
-                except Exception:
-                    pass
-                return data
+                return _sync_canonical(doc.to_dict() or {})
         except Exception:
             pass
 
-        # Fallback: create minimal profile
-        return {"nombre": email, "rol": "gestor", "activo": True}
+        return None
 
     def sign_out(self):
         """Clear authentication state."""

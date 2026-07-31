@@ -1752,28 +1752,35 @@ class FirestoreService {
 
   // ─────────────────── USERS (Admin) ───────────────────
 
-  /// Deduplicate users by canonical uid (mirrors list_gestor_users in admin-app).
+  /// Deduplicate users by canonical uid, preferring doc id == uid over legacy.
   static List<UserModel> deduplicateUsers(List<UserModel> users) {
-    final seen = <String>{};
-    final result = <UserModel>[];
+    final byUid = <String, UserModel>{};
     for (final user in users) {
       final canonicalUid =
           user.uid.isNotEmpty ? user.uid : user.email.toLowerCase();
-      if (canonicalUid.isEmpty || seen.contains(canonicalUid)) continue;
-      seen.add(canonicalUid);
-      result.add(user);
+      if (canonicalUid.isEmpty) continue;
+      byUid.putIfAbsent(canonicalUid, () => user);
     }
-    return result;
+    return byUid.values.toList();
   }
 
-  /// Get all users.
+  /// Get all users (canonical docs win over legacy email-keyed duplicates).
   Future<List<UserModel>> getUsers() async {
     try {
       final snapshot = await _db.collection('usuarios').get();
-      final users = snapshot.docs
-          .map((doc) => UserModel.fromMap(doc.id, doc.data()))
-          .toList();
-      return deduplicateUsers(users);
+      final byUid = <String, ({UserModel user, bool canonical})>{};
+      for (final doc in snapshot.docs) {
+        final data = doc.data();
+        final fieldUid = data['uid']?.toString().trim() ?? '';
+        final uid = fieldUid.isNotEmpty ? fieldUid : doc.id;
+        final isCanonical = doc.id == uid;
+        final user = UserModel.fromMap(uid, data);
+        final existing = byUid[uid];
+        if (existing == null || (isCanonical && !existing.canonical)) {
+          byUid[uid] = (user: user, canonical: isCanonical);
+        }
+      }
+      return byUid.values.map((e) => e.user).toList();
     } catch (e) {
       debugPrint('Error loading users: $e');
       return [];
@@ -1783,10 +1790,19 @@ class FirestoreService {
   /// Stream real-time user updates.
   Stream<List<UserModel>> streamUsers() {
     return _db.collection('usuarios').snapshots().map((snap) {
-      final users = snap.docs
-          .map((doc) => UserModel.fromMap(doc.id, doc.data()))
-          .toList();
-      return deduplicateUsers(users);
+      final byUid = <String, ({UserModel user, bool canonical})>{};
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        final fieldUid = data['uid']?.toString().trim() ?? '';
+        final uid = fieldUid.isNotEmpty ? fieldUid : doc.id;
+        final isCanonical = doc.id == uid;
+        final user = UserModel.fromMap(uid, data);
+        final existing = byUid[uid];
+        if (existing == null || (isCanonical && !existing.canonical)) {
+          byUid[uid] = (user: user, canonical: isCanonical);
+        }
+      }
+      return byUid.values.map((e) => e.user).toList();
     });
   }
 

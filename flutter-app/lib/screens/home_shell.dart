@@ -117,7 +117,7 @@ class _HomeShellState extends State<HomeShell> {
 
   void _onTabSelected(int index) {
     setState(() => _currentIndex = index);
-    final isGestor = context.read<AuthService>().profile?.isGestor ?? true;
+    final isGestor = context.read<AuthService>().profile?.isGestor ?? false;
     if (isGestor && index == _gestorMyRoutesTabIndex) {
       _myRoutesKey.currentState?.reload();
     }

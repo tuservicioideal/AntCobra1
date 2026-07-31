@@ -20,7 +20,10 @@ service cloud.firestore {
     }
 
     function isActiveUser() {
-      return isAuth() && getUserDoc().activo == true;
+      // Missing `activo` counts as active (aligned with Flutter UserModel).
+      return isAuth()
+        && exists(/databases/$(database)/documents/usuarios/$(request.auth.uid))
+        && getUserDoc().activo != false;
     }
 
     function getUserSections() {

@@ -149,7 +149,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     // For gestor role: only show their assigned sections
     // For admin/supervisor: show all campaign sections
-    final isGestor = profile?.isGestor ?? true;
+    final isGestor = profile?.isGestor ?? false;
     if (isGestor && profileSecciones.isNotEmpty) {
       _availableSections = profileSecciones.toList()..sort();
     } else {
@@ -185,7 +185,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     final auth = context.read<AuthService>();
     final profile = auth.profile;
-    final isGestor = profile?.isGestor ?? true;
+    final isGestor = profile?.isGestor ?? false;
     final profileSecciones = profile?.secciones ?? [];
 
     final List<String> sections;
@@ -215,7 +215,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Future<void> _refreshSortOrigin() async {
     if (!mounted) return;
     final profile = context.read<AuthService>().profile;
-    _isGestorRole = profile?.isGestor ?? true;
+    _isGestorRole = profile?.isGestor ?? false;
     if (!_isGestorRole) {
       _sortOriginLat = null;
       _sortOriginLng = null;
@@ -321,7 +321,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   Widget build(BuildContext context) {
     final auth = context.watch<AuthService>();
     final profile = auth.profile;
-    final isGestor = profile?.isGestor ?? true;
+    final isGestor = profile?.isGestor ?? false;
     final isCallGestor = profile?.isCallGestor ?? false;
     final campanaFilterNotifier = context.watch<CampanaBancoFilterNotifier>();
     final campanaFilter = campanaFilterNotifier.selected;
@@ -1005,7 +1005,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   /// Build hierarchical section menu items grouped by region/zona.
   List<PopupMenuEntry<String>> _buildSectionMenuItems() {
     final items = <PopupMenuEntry<String>>[];
-    final isGestor = context.read<AuthService>().profile?.isGestor ?? true;
+    final isGestor = context.read<AuthService>().profile?.isGestor ?? false;
     final allSectionsLabel =
         isGestor ? 'Todas mis secciones' : 'Toda la campaña';
 

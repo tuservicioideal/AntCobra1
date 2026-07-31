@@ -4,6 +4,7 @@ const {
   createGestorUserHandler,
   updateGestorUserHandler,
   deleteGestorUserHandler,
+  ensureCanonicalUserProfileHandler,
 } = require("./src/gestorUsers");
 
 initializeApp();
@@ -21,4 +22,9 @@ exports.updateGestorUser = onCall(
 exports.deleteGestorUser = onCall(
   { region: "us-central1" },
   deleteGestorUserHandler
+);
+
+exports.ensureCanonicalUserProfile = onCall(
+  { region: "us-central1" },
+  ensureCanonicalUserProfileHandler
 );

@@ -1,14 +1,16 @@
 import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import '../models/user_model.dart';
 
 /// Authentication service with multi-source profile resolution.
-/// Mirrors the gestor-app useAuth.js logic: searches by UID, email field,
-/// and email-derived ID to find the user profile.
+/// Prefers canonical `usuarios/{uid}`; never silently treats users as gestores.
 class AuthService extends ChangeNotifier {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final FirebaseFunctions _functions =
+      FirebaseFunctions.instanceFor(region: 'us-central1');
 
   User? _firebaseUser;
   UserModel? _profile;
@@ -46,11 +48,6 @@ class AuthService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Multi-source profile resolution (mirrors useAuth.js).
-  /// 1. Try direct UID doc
-  /// 2. Search by email field (case-insensitive)
-  /// 3. Try email-derived doc ID
-  /// If found via secondary source, sync to UID doc.
   Future<DocumentSnapshot<Map<String, dynamic>>?> _safeGetDoc(
     DocumentReference<Map<String, dynamic>> ref,
   ) async {
@@ -73,16 +70,6 @@ class AuthService extends ChangeNotifier {
     }
   }
 
-  UserModel _minimalProfile(User user) {
-    final email = (user.email ?? '').trim();
-    return UserModel(
-      uid: user.uid,
-      email: email,
-      nombre: user.displayName ?? (email.isNotEmpty ? email.split('@').first : 'Usuario'),
-      rol: 'gestor',
-    );
-  }
-
   Future<void> _resolveProfileOnce(User user) {
     if (_profileResolveUid == user.uid && _profileResolveFuture != null) {
       return _profileResolveFuture!;
@@ -95,22 +82,61 @@ class AuthService extends ChangeNotifier {
     return _profileResolveFuture!;
   }
 
+  Future<void> _failIncompleteProfile(String message) async {
+    debugPrint('Incomplete profile: $message');
+    _error = message;
+    _profile = null;
+    try {
+      await _auth.signOut();
+    } catch (e) {
+      debugPrint('Sign out after incomplete profile failed: $e');
+    }
+  }
+
+  /// Ensures `usuarios/{uid}` exists via Admin SDK (callable), copying legacy if needed.
+  Future<Map<String, dynamic>?> _ensureCanonicalProfile() async {
+    try {
+      final callable = _functions.httpsCallable('ensureCanonicalUserProfile');
+      final result = await callable.call().timeout(const Duration(seconds: 20));
+      final data = result.data;
+      if (data is Map) {
+        final profile = data['profile'];
+        if (profile is Map) {
+          return Map<String, dynamic>.from(profile);
+        }
+      }
+    } catch (e) {
+      debugPrint('ensureCanonicalUserProfile failed: $e');
+    }
+    return null;
+  }
+
   Future<void> _resolveProfile(User user) async {
     final email = (user.email ?? '').trim();
     final emailLower = email.toLowerCase();
 
     try {
       Map<String, dynamic>? profileData;
-      String? sourceDocId;
+      var fromCanonical = false;
 
-      // 1. Direct UID doc
+      // 1. Direct UID doc (always preferred)
       final uidDoc = await _safeGetDoc(_db.collection('usuarios').doc(user.uid));
       if (uidDoc?.exists == true && uidDoc!.data() != null) {
         profileData = uidDoc.data()!;
-        sourceDocId = user.uid;
+        fromCanonical = true;
       }
 
-      // 2. Search by email field (lowercase)
+      // 2. Missing canonical → Cloud Function sync from legacy / repair
+      if (profileData == null) {
+        final ensured = await _ensureCanonicalProfile();
+        if (ensured != null) {
+          profileData = ensured;
+          fromCanonical = true;
+        }
+      }
+
+      // 3. Fallback read: email field / email-derived ID (read-only for UI hint;
+      //    still require ensure so rules see usuarios/{uid})
       if (profileData == null && emailLower.isNotEmpty) {
         final emailQuery = await _safeQuery(
           _db
@@ -120,63 +146,59 @@ class AuthService extends ChangeNotifier {
         );
         if (emailQuery != null && emailQuery.docs.isNotEmpty) {
           profileData = emailQuery.docs.first.data();
-          sourceDocId = emailQuery.docs.first.id;
         }
       }
 
-      // 3. Try email-derived doc ID
       if (profileData == null && emailLower.isNotEmpty) {
         final emailId = emailLower.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '_');
         final emailDoc = await _safeGetDoc(_db.collection('usuarios').doc(emailId));
         if (emailDoc?.exists == true && emailDoc!.data() != null) {
           profileData = emailDoc.data()!;
-          sourceDocId = emailId;
         }
       }
 
-      if (profileData != null) {
-        if (profileData['activo'] == false) {
-          debugPrint('User account is deactivated');
-          _error = 'Tu cuenta ha sido desactivada. Contacta al administrador.';
-          _profile = null;
-          await _auth.signOut();
-          return;
-        }
-
-        _profile = UserModel.fromMap(user.uid, profileData);
-        _error = null;
-
-        // Sync to canonical UID doc when found elsewhere (non-blocking).
-        if (sourceDocId != null && sourceDocId != user.uid) {
-          try {
-            await _db.collection('usuarios').doc(user.uid).set({
-              ...profileData,
-              'uid': user.uid,
-              'email': emailLower,
-            }, SetOptions(merge: true));
-          } catch (e) {
-            debugPrint('Could not sync profile to UID doc: $e');
-          }
-        }
+      if (profileData == null) {
+        await _failIncompleteProfile(
+          'Tu perfil no está configurado. Contacta al administrador.',
+        );
         return;
       }
 
-      // No profile found — use minimal in-memory profile.
-      _profile = _minimalProfile(user);
-      _error = null;
-      try {
-        await _db.collection('usuarios').doc(user.uid).set({
-          ..._profile!.toMap(),
-          'uid': user.uid,
-          'activo': true,
-        }, SetOptions(merge: true));
-      } catch (e) {
-        debugPrint('Could not create placeholder profile: $e');
+      if (profileData['activo'] == false) {
+        await _failIncompleteProfile(
+          'Tu cuenta ha sido desactivada. Contacta al administrador.',
+        );
+        return;
       }
+
+      final rol = profileData['rol']?.toString().trim() ?? '';
+      if (rol.isEmpty) {
+        await _failIncompleteProfile(
+          'Tu perfil no tiene rol asignado. Contacta al administrador.',
+        );
+        return;
+      }
+
+      // If we only have a legacy doc in memory, try ensure once more so rules work.
+      if (!fromCanonical) {
+        final ensured = await _ensureCanonicalProfile();
+        if (ensured != null) {
+          profileData = ensured;
+        } else {
+          await _failIncompleteProfile(
+            'No se pudo sincronizar tu perfil. Contacta al administrador.',
+          );
+          return;
+        }
+      }
+
+      _profile = UserModel.fromMap(user.uid, profileData);
+      _error = null;
     } catch (e) {
       debugPrint('Error resolving profile: $e');
-      _profile = _minimalProfile(user);
-      _error = null;
+      await _failIncompleteProfile(
+        'No se pudo cargar tu perfil. Intenta de nuevo o contacta al administrador.',
+      );
     }
   }
 

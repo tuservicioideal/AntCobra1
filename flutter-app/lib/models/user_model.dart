@@ -39,11 +39,14 @@ class UserModel {
       email: data['email']?.toString() ?? '',
       seccion: data['seccion']?.toString() ?? '',
       secciones: parsedSecciones,
-      rol: data['rol']?.toString() ?? 'gestor',
+      rol: (data['rol']?.toString().trim().isNotEmpty == true)
+          ? data['rol'].toString().trim()
+          : 'gestor',
       telefono: data['telefono']?.toString() ?? '',
       zona: data['zona']?.toString() ?? '',
       region: data['region']?.toString() ?? '',
       canal: data['canal']?.toString() ?? 'campo',
+      // Align with firestore.rules: missing activo is treated as active.
       activo: _parseBool(data['activo'], defaultValue: true),
     );
   }

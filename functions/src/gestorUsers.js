@@ -335,6 +335,99 @@ async function deleteGestorUserHandler(request) {
   }
 }
 
+/**
+ * Ensure the caller has a canonical usuarios/{uid} profile.
+ * Copies from a legacy email-keyed doc when needed (Admin SDK).
+ * Does NOT invent rol=gestor — fails if no profile exists.
+ */
+async function ensureCanonicalUserProfileHandler(request) {
+  if (!request.auth) {
+    throw new HttpsError("unauthenticated", "Debes iniciar sesión.");
+  }
+
+  const uid = request.auth.uid;
+  const email = ((request.auth.token && request.auth.token.email) || "")
+    .trim()
+    .toLowerCase();
+  const db = getFirestore();
+
+  const sanitizeProfile = (raw) => {
+    const data = { ...(raw || {}) };
+    delete data.fecha_sincronizacion;
+    const rol = (data.rol || "").toString().trim().toLowerCase();
+    if (!VALID_ROLES.includes(rol)) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Tu perfil no tiene un rol válido. Contacta al administrador."
+      );
+    }
+    const canalRaw = (data.canal || "campo").toString().trim().toLowerCase();
+    return {
+      ...data,
+      uid,
+      email: email || (data.email || "").toString().toLowerCase(),
+      rol,
+      activo: data.activo !== false,
+      canal: VALID_CANALES.includes(canalRaw) ? canalRaw : "campo",
+      secciones: Array.isArray(data.secciones) ? data.secciones : [],
+    };
+  };
+
+  const canonicalRef = db.collection("usuarios").doc(uid);
+  const canonical = await canonicalRef.get();
+  if (canonical.exists) {
+    const raw = canonical.data() || {};
+    const updates = {};
+    if (!raw.uid) updates.uid = uid;
+    if (raw.activo === undefined) updates.activo = true;
+    if (email && !raw.email) updates.email = email;
+    if (Object.keys(updates).length > 0) {
+      await canonicalRef.update(updates);
+    }
+    const profile = sanitizeProfile({ ...raw, ...updates });
+    return { success: true, created: false, profile };
+  }
+
+  let legacyData = null;
+
+  if (email) {
+    const byEmail = await db
+      .collection("usuarios")
+      .where("email", "==", email)
+      .limit(1)
+      .get();
+    if (!byEmail.empty) {
+      legacyData = byEmail.docs[0].data() || {};
+    }
+  }
+
+  if (!legacyData && email) {
+    const emailId = emailDerivedDocId(email);
+    const emailDoc = await db.collection("usuarios").doc(emailId).get();
+    if (emailDoc.exists) {
+      legacyData = emailDoc.data() || {};
+    }
+  }
+
+  if (!legacyData) {
+    throw new HttpsError(
+      "not-found",
+      "Tu perfil no está configurado. Contacta al administrador."
+    );
+  }
+
+  const profile = sanitizeProfile(legacyData);
+  await canonicalRef.set(
+    {
+      ...profile,
+      fecha_sincronizacion: FieldValue.serverTimestamp(),
+    },
+    { merge: true }
+  );
+
+  return { success: true, created: true, profile };
+}
+
 module.exports = {
   assertCanManageUsers,
   normalizeRoleCanal,
@@ -342,4 +435,5 @@ module.exports = {
   createGestorUserHandler,
   updateGestorUserHandler,
   deleteGestorUserHandler,
+  ensureCanonicalUserProfileHandler,
 };

@@ -271,7 +271,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
 
       final auth = context.read<AuthService>();
       final profile = auth.profile;
-      final isGestor = profile?.isGestor ?? true;
+      final isGestor = profile?.isGestor ?? false;
 
       List<Map<String, dynamic>> sections;
       if (isGestor) {

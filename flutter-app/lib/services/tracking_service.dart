@@ -19,6 +19,7 @@ class TrackingService extends ChangeNotifier {
   TrackingService._internal();
 
   static const double _minDistanceMeters = 30.0;
+  static const double _maxAccuracyMeters = 50.0;
   static const Duration _heartbeat = Duration(minutes: 2);
   static const Duration _batchInterval = Duration(seconds: 60);
   static const int _maxBufferSize = 50;
@@ -142,6 +143,9 @@ class TrackingService extends ChangeNotifier {
   void _onPosition(Position position) {
     _currentPosition = position;
 
+    // Descartar fixes de mala calidad (salvo heartbeat, que usa _currentPosition).
+    if (position.accuracy > _maxAccuracyMeters) return;
+
     final shouldRecord = _lastRecordedLat == null ||
         _haversineMeters(
               _lastRecordedLat!,
@@ -166,6 +170,8 @@ class TrackingService extends ChangeNotifier {
       'lat': position.latitude,
       'lng': position.longitude,
       'accuracy': position.accuracy,
+      'speed': position.speed,
+      'is_mock': position.isMocked,
       'timestamp': FieldValue.serverTimestamp(),
       'fecha': now.toIso8601String(),
       'fecha_dia': _formatFechaDia(now),

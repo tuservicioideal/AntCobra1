@@ -75,6 +75,7 @@ class TrailPoint {
   final String fechaDia;
   final String tipo;
   final String cliente;
+  final String clienteId;
   final String estado;
   final double accuracy;
   final Timestamp? timestamp;
@@ -86,6 +87,7 @@ class TrailPoint {
     this.fechaDia = '',
     this.tipo = 'auto',
     this.cliente = '',
+    this.clienteId = '',
     this.estado = '',
     this.accuracy = 0,
     this.timestamp,
@@ -102,6 +104,7 @@ class TrailPoint {
       fechaDia: d['fecha_dia']?.toString() ?? '',
       tipo: d['tipo']?.toString() ?? 'visita',
       cliente: d['cliente_nombre']?.toString() ?? '',
+      clienteId: d['cliente_id']?.toString() ?? '',
       estado: d['estado']?.toString() ?? '',
       accuracy: _toDouble(d['accuracy']) ?? 0,
       timestamp: d['timestamp'] as Timestamp?,

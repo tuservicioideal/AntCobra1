@@ -31,6 +31,7 @@ import '../widgets/client_detail/client_detail_location_section.dart';
 import '../widgets/client_detail/client_detail_notes_section.dart';
 import '../widgets/client_detail/client_detail_contact_agenda_section.dart';
 import '../widgets/client_detail/client_detail_debts_section.dart';
+import '../widgets/client_detail/client_detail_doxeo_section.dart';
 import '../widgets/client_detail/client_detail_history_section.dart';
 import '../widgets/client_detail/client_detail_tags_section.dart';
 import 'package:provider/provider.dart';
@@ -644,6 +645,7 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
                   saving: _savingTags,
                   onSave: _saveClientTags,
                 ),
+                ClientDetailDoxeoSection(client: client),
                 ClientDetailHistorySection(
                   visitas: _visitHistory,
                   loading: _loadingVisitHistory,

@@ -64,6 +64,30 @@
       "fields": [
         { "fieldPath": "estado_gestion", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "doxeo_jobs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "estado", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "doxeo_jobs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "solicitante.uid", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "doxeo_jobs",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "cliente.cliente_id", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

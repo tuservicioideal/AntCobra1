@@ -195,6 +195,45 @@ service cloud.firestore {
       allow write: if isAdminOrSupervisor();
     }
 
+    // ── Doxeo (consultas Telegram vía worker PC) ─────────────
+    // El APK encola trabajos; un worker twi con Admin SDK (bypasea rules)
+    // los reclama, ejecuta contra Telegram y escribe el resultado.
+    // Comandos y heartbeats los escribe solo el worker (Admin SDK).
+    match /doxeo_comandos/{comandoId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
+
+    match /doxeo_workers/{workerId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
+
+    match /doxeo_jobs/{jobId} {
+      allow read: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || resource.data.solicitante.uid == request.auth.uid
+        || (
+          resource.data.cliente.seccion_key is string
+          && resource.data.cliente.seccion_key in getUserSections()
+        )
+      );
+      allow create: if isActiveUser()
+        && request.resource.data.keys().hasAll([
+          'dni', 'comando_id', 'comando_nombre', 'mensaje',
+          'cliente', 'solicitante', 'estado', 'creado_at'
+        ])
+        && request.resource.data.estado == 'pendiente'
+        && request.resource.data.solicitante.uid == request.auth.uid;
+      // El gestor solo puede cancelar su propio trabajo mientras siga pendiente.
+      allow update: if isActiveUser()
+        && resource.data.solicitante.uid == request.auth.uid
+        && resource.data.estado == 'pendiente'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estado'])
+        && request.resource.data.estado == 'cancelado';
+      allow delete: if false;
+    }
+
     // ── Rutas Diarias (Route Planning) ───────────────────────
     // Gestors create/update their own routes (doc ID = date_uid).
     // Admin/supervisor can read all routes.

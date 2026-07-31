@@ -1,18 +1,20 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 
 import '../config/theme.dart';
 import '../models/client_model.dart';
+import '../services/auth_service.dart';
 import '../services/campaign_service.dart';
 import '../services/campaign_stats_service.dart';
-import '../services/doxeo_api_service.dart';
+import '../services/doxeo_queue_service.dart';
 import '../utils/contact_metrics_utils.dart';
+import '../widgets/client_detail/client_detail_doxeo_section.dart';
 
-/// Pantalla "Consultas Telegram": elige cliente → elige consulta (comando)
-/// → el backend twi envía el mensaje al bot/contacto y devuelve la respuesta
-/// con texto e imágenes.
+/// Pantalla "Consultas Telegram": elige cliente → elige consulta (comando) →
+/// encola el trabajo en Firestore; cualquier PC con twi abierto lo ejecuta
+/// contra el bot de Telegram y el resultado llega en vivo.
 class ConsultaTelegramScreen extends StatefulWidget {
   final ClientModel? initialClient;
   final String? campaignId;
@@ -24,17 +26,12 @@ class ConsultaTelegramScreen extends StatefulWidget {
 }
 
 class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
-  final _api = DoxeoApiService();
+  final _queue = DoxeoQueueService();
   final _campaignService = CampaignService();
   final _statsService = CampaignStatsService();
   final _searchController = TextEditingController();
   final _dniController = TextEditingController();
 
-  bool _configLoaded = false;
-  DoxeoStatus? _status;
-  String? _statusError;
-
-  List<DoxeoCommand> _commands = [];
   String _selectedCommandId = '';
 
   String? _campaignId;
@@ -44,8 +41,8 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
   ClientModel? _selectedClient;
   Timer? _debounce;
 
-  bool _running = false;
-  DoxeoQueryResult? _result;
+  bool _launching = false;
+  String? _activeJobId;
 
   @override
   void initState() {
@@ -54,10 +51,10 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
     _campaignId = widget.campaignId;
     if (_selectedClient != null) {
       _dniController.text = _selectedClient!.numeroDocumento;
+      unawaited(_ensureClientsLoaded());
     }
     _searchController.addListener(_onSearchChanged);
     _dniController.addListener(() => setState(() {}));
-    _bootstrap();
   }
 
   @override
@@ -66,43 +63,6 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
     _searchController.dispose();
     _dniController.dispose();
     super.dispose();
-  }
-
-  Future<void> _bootstrap() async {
-    await _api.load();
-    if (!mounted) return;
-    setState(() => _configLoaded = true);
-    if (_api.isConfigured) {
-      await _refreshRemote();
-    }
-    _campaignId ??= await _campaignService.getActiveCampaignId();
-    // Si venimos con un cliente, precargar lista para permitir cambiar.
-    if (_selectedClient != null) {
-      unawaited(_ensureClientsLoaded());
-    }
-  }
-
-  Future<void> _refreshRemote() async {
-    setState(() => _statusError = null);
-    try {
-      final status = await _api.getStatus();
-      final commands = await _api.listCommands();
-      if (!mounted) return;
-      setState(() {
-        _status = status;
-        _commands = commands;
-        if (_selectedCommandId.isNotEmpty &&
-            !_commands.any((c) => c.id == _selectedCommandId)) {
-          _selectedCommandId = '';
-        }
-      });
-    } on DoxeoException catch (e) {
-      if (!mounted) return;
-      setState(() => _statusError = e.message);
-    } catch (e) {
-      if (!mounted) return;
-      setState(() => _statusError = 'Sin conexión con el servidor: $e');
-    }
   }
 
   Future<void> _ensureClientsLoaded() async {
@@ -146,53 +106,47 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
     });
   }
 
-  DoxeoCommand? get _selectedCommand {
-    if (_selectedCommandId.isEmpty) return null;
-    for (final c in _commands) {
-      if (c.id == _selectedCommandId) return c;
-    }
-    return null;
-  }
-
   String get _dni => _dniController.text.replaceAll(RegExp(r'[^0-9A-Za-z]'), '');
 
-  String get _messagePreview {
-    final dni = _dni;
-    if (dni.isEmpty) return '';
-    final cmd = _selectedCommand;
-    if (cmd == null) return dni;
-    return cmd.previewMessage(dni);
-  }
+  bool get _canQuery => !_launching && _activeJobId == null && _dni.length >= 7;
 
-  bool get _canQuery =>
-      _api.isConfigured &&
-      !_running &&
-      _dni.length >= 7 &&
-      (_status?.sessionAuthorized ?? false);
-
-  Future<void> _runQuery() async {
-    final dni = _dni;
-    if (dni.length < 7) return;
-    setState(() {
-      _running = true;
-      _result = null;
-    });
+  Future<void> _runQuery(List<DoxeoComando> comandos) async {
+    final profile = context.read<AuthService>().profile;
+    if (profile == null) return;
+    DoxeoComando? comando;
+    for (final c in comandos) {
+      if (c.id == _selectedCommandId) comando = c;
+    }
+    setState(() => _launching = true);
     try {
-      final result = await _api.runQuery(
-        dni: dni,
-        commandId: _selectedCommandId.isEmpty ? null : _selectedCommandId,
-        timeoutSec: 60,
+      final cliente = _selectedClient ??
+          ClientModel(
+            id: 'libre_${_dniController.text.trim()}',
+            numeroDocumento: _dni,
+            nombreCompleto: 'Consulta libre',
+            campaignId: _campaignId ?? '',
+          );
+      final yaActiva = await _queue.tieneConsultaActiva(
+        uid: profile.uid,
+        clienteId: cliente.id,
+      );
+      if (yaActiva) {
+        _showSnack('Ya tienes una consulta en curso para este cliente.',
+            isError: true);
+        return;
+      }
+      final jobId = await _queue.crearConsulta(
+        cliente: cliente,
+        solicitante: profile,
+        comando: comando,
+        dniOverride: _dni,
       );
       if (!mounted) return;
-      setState(() => _result = result);
-    } on DoxeoException catch (e) {
-      _showSnack(e.message, isError: true);
-    } on TimeoutException {
-      _showSnack('La consulta tardó demasiado. Intenta de nuevo.', isError: true);
+      setState(() => _activeJobId = jobId);
     } catch (e) {
-      _showSnack('Error de conexión: $e', isError: true);
+      _showSnack('No se pudo encolar la consulta: $e', isError: true);
     } finally {
-      if (mounted) setState(() => _running = false);
+      if (mounted) setState(() => _launching = false);
     }
   }
 
@@ -206,64 +160,6 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
     );
   }
 
-  Future<void> _openSettings() async {
-    final baseCtrl = TextEditingController(
-      text: _api.baseUrl.isEmpty ? 'http://192.168.1.100:8080' : _api.baseUrl,
-    );
-    final keyCtrl = TextEditingController(text: _api.apiKey);
-    final saved = await showDialog<bool>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Conexión con el servidor'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'URL del panel de cobranzas (PC encendida con el sistema) y la '
-              'API Key móvil definida en Configuraciones → Telegram.',
-              style: TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: baseCtrl,
-              keyboardType: TextInputType.url,
-              decoration: const InputDecoration(
-                labelText: 'URL base (ej. http://192.168.1.100:8080)',
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: keyCtrl,
-              obscureText: true,
-              decoration: const InputDecoration(
-                labelText: 'API Key móvil',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Cancelar'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Guardar'),
-          ),
-        ],
-      ),
-    );
-    if (saved == true) {
-      await _api.save(baseUrl: baseCtrl.text, apiKey: keyCtrl.text);
-      if (!mounted) return;
-      setState(() {});
-      _showSnack('Conexión guardada');
-      await _refreshRemote();
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -271,102 +167,65 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
       appBar: AppBar(
         title: const Text('Consulta Telegram'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.settings_outlined),
-            tooltip: 'Conexión con el servidor',
-            onPressed: _openSettings,
+          Padding(
+            padding: const EdgeInsets.only(right: 12),
+            child: Center(child: DoxeoWorkersBadge(queue: _queue)),
           ),
         ],
       ),
-      body: !_configLoaded
-          ? const Center(child: CircularProgressIndicator())
-          : RefreshIndicator(
-              onRefresh: _refreshRemote,
-              child: ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  if (!_api.isConfigured)
-                    _buildConfigNeededCard()
-                  else ...[
-                    _buildStatusBanner(),
-                    const SizedBox(height: 12),
-                    _buildClientCard(),
-                    const SizedBox(height: 12),
-                    _buildQueryCard(),
-                    const SizedBox(height: 16),
-                    _buildQueryButton(),
-                    if (_result != null) ...[
-                      const SizedBox(height: 16),
-                      _buildResultCard(_result!),
-                    ],
-                  ],
-                ],
-              ),
-            ),
-    );
-  }
-
-  Widget _buildConfigNeededCard() {
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          children: [
-            const Icon(Icons.link_off, size: 40, color: AppTheme.textMuted),
-            const SizedBox(height: 12),
-            const Text(
-              'Falta conectar con el servidor de cobranzas',
-              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 6),
-            const Text(
-              'Configura la URL del panel y la API Key móvil para hacer consultas por Telegram.',
-              style: TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-              textAlign: TextAlign.center,
-            ),
-            const SizedBox(height: 14),
-            FilledButton.icon(
-              onPressed: _openSettings,
-              icon: const Icon(Icons.settings),
-              label: const Text('Configurar conexión'),
-            ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _buildWorkersBanner(),
+          const SizedBox(height: 12),
+          _buildClientCard(),
+          const SizedBox(height: 12),
+          _buildQueryCard(),
+          const SizedBox(height: 16),
+          _buildQueryButton(),
+          if (_activeJobId != null) ...[
+            const SizedBox(height: 16),
+            _buildActiveJob(),
           ],
-        ),
+          const SizedBox(height: 16),
+          _buildHistorialGestor(),
+        ],
       ),
     );
   }
 
-  Widget _buildStatusBanner() {
-    if (_statusError != null) {
-      return _banner(
-        icon: Icons.cloud_off,
-        color: AppTheme.danger,
-        text: _statusError!,
-        action: TextButton(onPressed: _refreshRemote, child: const Text('Reintentar')),
-      );
-    }
-    final status = _status;
-    if (status == null) {
-      return _banner(
-        icon: Icons.sync,
-        color: AppTheme.warning,
-        text: 'Comprobando conexión…',
-      );
-    }
-    if (!status.sessionAuthorized) {
-      return _banner(
-        icon: Icons.warning_amber_rounded,
-        color: AppTheme.danger,
-        text:
-            'El servidor no tiene sesión de Telegram activa. Inicia sesión con QR en el panel web.',
-      );
-    }
-    return _banner(
-      icon: Icons.check_circle_outline,
-      color: AppTheme.success,
-      text:
-          'Telegram conectado (${status.userName}) · ${status.commands} consulta(s) disponibles',
+  Widget _buildWorkersBanner() {
+    return StreamBuilder<List<DoxeoWorker>>(
+      stream: _queue.streamWorkers(),
+      builder: (context, snap) {
+        final workers = (snap.data ?? const <DoxeoWorker>[])
+            .where((w) => w.online)
+            .toList();
+        final conTelegram = workers.where((w) => w.telegramOk).length;
+        if (workers.isNotEmpty && conTelegram > 0) {
+          return _banner(
+            icon: Icons.check_circle_outline,
+            color: AppTheme.success,
+            text: '$conTelegram PC(s) con Telegram listo para consultar.',
+          );
+        }
+        if (workers.isNotEmpty) {
+          return _banner(
+            icon: Icons.warning_amber_rounded,
+            color: AppTheme.warning,
+            text:
+                'Hay ${workers.length} PC(s) conectadas pero sin sesión de Telegram. '
+                'Inicia sesión con QR en el panel.',
+          );
+        }
+        return _banner(
+          icon: Icons.cloud_off,
+          color: AppTheme.danger,
+          text:
+              'Ninguna PC con el sistema está conectada. La consulta quedará '
+              'en cola hasta que una se conecte.',
+        );
+      },
     );
   }
 
@@ -434,7 +293,7 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
               TextField(
                 controller: _searchController,
                 decoration: InputDecoration(
-                  hintText: 'Buscar por nombre, DNI o código…',
+                  hintText: 'Buscar por nombre, DNI o código… (opcional)',
                   prefixIcon: const Icon(Icons.search),
                   border: OutlineInputBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -479,65 +338,86 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
           children: [
             const _SectionTitle(number: '2', title: 'Elige la consulta'),
             const SizedBox(height: 10),
-            DropdownButtonFormField<String>(
-              value: _selectedCommandId,
-              decoration: InputDecoration(
-                labelText: 'Consulta (comando)',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-              items: [
-                const DropdownMenuItem(
-                  value: '',
-                  child: Text('Solo DNI (sin comando)'),
-                ),
-                ..._commands.map(
-                  (c) => DropdownMenuItem(
-                    value: c.id,
-                    child: Text(
-                      c.command.isEmpty ? c.name : '${c.name} · ${c.command}',
-                      overflow: TextOverflow.ellipsis,
+            StreamBuilder<List<DoxeoComando>>(
+              stream: _queue.streamComandos(),
+              builder: (context, snap) {
+                final comandos = snap.data ?? const <DoxeoComando>[];
+                final effectiveId =
+                    comandos.any((c) => c.id == _selectedCommandId)
+                        ? _selectedCommandId
+                        : '';
+                DoxeoComando? comandoSel;
+                for (final c in comandos) {
+                  if (c.id == effectiveId) {
+                    comandoSel = c;
+                    break;
+                  }
+                }
+                final preview =
+                    _dni.isEmpty ? '' : (comandoSel?.previewMessage(_dni) ?? _dni);
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    DropdownButtonFormField<String>(
+                      value: effectiveId,
+                      decoration: InputDecoration(
+                        labelText: 'Consulta (comando)',
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12)),
+                      ),
+                      items: [
+                        const DropdownMenuItem(
+                          value: '',
+                          child: Text('Solo DNI (sin comando)'),
+                        ),
+                        ...comandos.map(
+                          (c) => DropdownMenuItem(
+                            value: c.id,
+                            child: Text(
+                              c.plantilla.isEmpty
+                                  ? c.nombre
+                                  : '${c.nombre} · ${c.plantilla}',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ),
+                      ],
+                      onChanged: (value) =>
+                          setState(() => _selectedCommandId = value ?? ''),
                     ),
-                  ),
-                ),
-              ],
-              onChanged: (value) =>
-                  setState(() => _selectedCommandId = value ?? ''),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: _dniController,
+                      keyboardType: TextInputType.number,
+                      decoration: InputDecoration(
+                        labelText: 'DNI a consultar',
+                        border: OutlineInputBorder(
+                            borderRadius: BorderRadius.circular(12)),
+                      ),
+                    ),
+                    if (preview.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        width: double.infinity,
+                        padding: const EdgeInsets.all(10),
+                        decoration: BoxDecoration(
+                          color: AppTheme.primaryLight,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          'Se enviará: $preview',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: AppTheme.primaryDark,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                );
+              },
             ),
-            if (_selectedCommand?.description.isNotEmpty == true) ...[
-              const SizedBox(height: 6),
-              Text(
-                _selectedCommand!.description,
-                style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-              ),
-            ],
-            const SizedBox(height: 10),
-            TextField(
-              controller: _dniController,
-              keyboardType: TextInputType.number,
-              decoration: InputDecoration(
-                labelText: 'DNI a consultar',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-            if (_messagePreview.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: AppTheme.primaryLight,
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Text(
-                  'Se enviará: $_messagePreview',
-                  style: const TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: AppTheme.primaryDark,
-                  ),
-                ),
-              ),
-            ],
           ],
         ),
       ),
@@ -546,217 +426,138 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
 
   Widget _buildQueryButton() {
     String hint = '';
-    if (_api.isConfigured) {
-      if (!(_status?.sessionAuthorized ?? false)) {
-        hint = 'Sin sesión de Telegram en el servidor';
-      } else if (_dni.length < 7) {
-        hint = 'Elige un cliente o escribe un DNI válido';
-      }
+    if (_activeJobId != null) {
+      hint = 'Espera a que termine la consulta en curso';
+    } else if (_dni.length < 7) {
+      hint = 'Elige un cliente o escribe un DNI válido';
     }
-    return Column(
-      children: [
-        SizedBox(
-          width: double.infinity,
-          child: FilledButton.icon(
-            onPressed: _canQuery ? _runQuery : null,
-            icon: _running
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
-                    ),
-                  )
-                : const Icon(Icons.send),
-            label: Text(_running ? 'Consultando…' : 'Consultar'),
-            style: FilledButton.styleFrom(
-              padding: const EdgeInsets.symmetric(vertical: 14),
-            ),
-          ),
-        ),
-        if (_running)
-          const Padding(
-            padding: EdgeInsets.only(top: 8),
-            child: Text(
-              'Esperando respuesta de Telegram (puede tardar hasta 1 min)…',
-              style: TextStyle(fontSize: 11, color: AppTheme.textSecondary),
-            ),
-          )
-        else if (hint.isNotEmpty)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text(
-              hint,
-              style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildResultCard(DoxeoQueryResult result) {
-    final images = result.repliesWithImage;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+    return StreamBuilder<List<DoxeoComando>>(
+      stream: _queue.streamComandos(),
+      builder: (context, snap) {
+        final comandos = snap.data ?? const <DoxeoComando>[];
+        return Column(
           children: [
-            Row(
-              children: [
-                _statusChip(result),
-                const SizedBox(width: 8),
-                if (result.commandName.isNotEmpty)
-                  Chip(
-                    label: Text(result.commandName),
-                    visualDensity: VisualDensity.compact,
-                  ),
-              ],
-            ),
-            if (result.error.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text(result.error, style: const TextStyle(color: AppTheme.danger)),
-            ],
-            if (result.messageSent.isNotEmpty) ...[
-              const SizedBox(height: 8),
-              Text(
-                'Enviado: ${result.messageSent}',
-                style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-              ),
-            ],
-            if (result.nombre.isNotEmpty) ...[
-              const SizedBox(height: 12),
-              const Text('Nombre', style: TextStyle(fontSize: 11, color: AppTheme.textMuted)),
-              Text(
-                result.nombre,
-                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15),
-              ),
-            ],
-            if (result.phones.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              const Text('Teléfonos', style: TextStyle(fontSize: 11, color: AppTheme.textMuted)),
-              const SizedBox(height: 4),
-              Wrap(
-                spacing: 6,
-                runSpacing: 6,
-                children: result.phones
-                    .map(
-                      (p) => Chip(
-                        avatar: const Icon(Icons.phone, size: 14),
-                        label: Text(p),
-                        visualDensity: VisualDensity.compact,
-                      ),
-                    )
-                    .toList(),
-              ),
-            ],
-            if (result.addresses.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              const Text('Direcciones', style: TextStyle(fontSize: 11, color: AppTheme.textMuted)),
-              ...result.addresses.map(
-                (a) => Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text('• $a', style: const TextStyle(fontSize: 13)),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: _canQuery ? () => _runQuery(comandos) : null,
+                icon: _launching
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.send),
+                label: Text(_launching ? 'Encolando…' : 'Consultar'),
+                style: FilledButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
                 ),
               ),
-            ],
-            if (result.rawReply.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              ExpansionTile(
-                tilePadding: EdgeInsets.zero,
-                title: const Text('Respuesta completa', style: TextStyle(fontSize: 13)),
-                children: [
-                  Container(
-                    width: double.infinity,
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      color: AppTheme.divider,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: SelectableText(
-                      result.rawReply,
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-            if (images.isNotEmpty) ...[
-              const SizedBox(height: 10),
-              const Text('Imágenes', style: TextStyle(fontSize: 11, color: AppTheme.textMuted)),
-              const SizedBox(height: 6),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: images.map((r) => _imageThumb(r)).toList(),
-              ),
-            ],
-            if (result.replies.isEmpty && result.error.isEmpty)
-              const Padding(
-                padding: EdgeInsets.only(top: 8),
+            ),
+            if (hint.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
                 child: Text(
-                  'Sin respuesta del bot/contacto en el tiempo de espera.',
-                  style: TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                  hint,
+                  style: const TextStyle(
+                      fontSize: 11, color: AppTheme.textSecondary),
                 ),
               ),
           ],
-        ),
-      ),
+        );
+      },
     );
   }
 
-  Widget _statusChip(DoxeoQueryResult result) {
-    final ok = result.isOk;
-    final timeout = result.status == 'timeout';
-    final color = ok
-        ? AppTheme.success
-        : timeout
-            ? AppTheme.warning
-            : AppTheme.danger;
-    final label = ok
-        ? 'OK'
-        : timeout
-            ? 'Sin respuesta'
-            : 'Error';
-    return Chip(
-      avatar: Icon(
-        ok ? Icons.check_circle : Icons.error_outline,
-        size: 16,
-        color: color,
-      ),
-      label: Text(label, style: TextStyle(color: color)),
-      visualDensity: VisualDensity.compact,
-      side: BorderSide(color: color.withValues(alpha: 0.4)),
+  Widget _buildActiveJob() {
+    final jobId = _activeJobId;
+    if (jobId == null) return const SizedBox.shrink();
+    return StreamBuilder<DoxeoJob>(
+      stream: _queue.streamJob(jobId),
+      builder: (context, snap) {
+        final job = snap.data;
+        if (job == null) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        return Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: DoxeoJobView(
+              job: job,
+              queue: _queue,
+              onCancel: job.isPending
+                  ? () => _queue.cancelarJob(job.id)
+                  : null,
+              onClose: job.isDone
+                  ? () => setState(() => _activeJobId = null)
+                  : null,
+            ),
+          ),
+        );
+      },
     );
   }
 
-  Widget _imageThumb(DoxeoReply reply) {
-    final bytes = base64Decode(reply.media!.dataBase64);
-    return GestureDetector(
-      onTap: () => _showFullImage(bytes),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: Image.memory(
-          bytes,
-          width: 110,
-          height: 110,
-          fit: BoxFit.cover,
-        ),
-      ),
+  Widget _buildHistorialGestor() {
+    final profile = context.read<AuthService>().profile;
+    if (profile == null) return const SizedBox.shrink();
+    return StreamBuilder<List<DoxeoJob>>(
+      stream: _queue.streamHistorialGestor(profile.uid),
+      builder: (context, snap) {
+        final jobs = (snap.data ?? const <DoxeoJob>[])
+            .where((j) => j.id != _activeJobId)
+            .toList();
+        if (jobs.isEmpty) return const SizedBox.shrink();
+        return Card(
+          child: Padding(
+            padding: const EdgeInsets.all(14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Mis consultas recientes',
+                  style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
+                ),
+                const SizedBox(height: 6),
+                ...jobs.map(
+                  (job) => ExpansionTile(
+                    tilePadding: EdgeInsets.zero,
+                    childrenPadding: EdgeInsets.zero,
+                    dense: true,
+                    leading: DoxeoJobStatusDot(estado: job.estado),
+                    title: Text(
+                      job.comandoNombre.isEmpty ? 'Solo DNI' : job.comandoNombre,
+                      style: const TextStyle(
+                          fontSize: 12, fontWeight: FontWeight.w600),
+                    ),
+                    subtitle: Text(
+                      'DNI ${job.dni}'
+                      '${job.creadoAt == null ? "" : " · ${_fechaCorta(job.creadoAt!)}"}',
+                      style: const TextStyle(
+                          fontSize: 11, color: AppTheme.textSecondary),
+                    ),
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: DoxeoJobView(job: job, queue: _queue, compact: true),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 
-  void _showFullImage(dynamic bytes) {
-    showDialog(
-      context: context,
-      builder: (ctx) => Dialog(
-        insetPadding: const EdgeInsets.all(12),
-        child: InteractiveViewer(
-          child: Image.memory(bytes, fit: BoxFit.contain),
-        ),
-      ),
-    );
+  String _fechaCorta(DateTime fecha) {
+    return '${fecha.day.toString().padLeft(2, '0')}/${fecha.month.toString().padLeft(2, '0')} '
+        '${fecha.hour.toString().padLeft(2, '0')}:${fecha.minute.toString().padLeft(2, '0')}';
   }
 }
 

@@ -16,6 +16,7 @@ import logging
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from config import APP_VERSION
 from services.excel_parser import parse_excel, get_hierarchy
 from services.firebase_service import FirebaseService
 from services.auth_service import AuthService, AuthResult
@@ -23,6 +24,7 @@ from services.word_generator import generate_all_letters, generate_tramo_letters
 from services.database import db_service, TramoEnum
 from services.campaign_manager import CampaignManager
 from services.tramo_engine import TramoEngine
+from services import update_service
 
 from .theme import *
 from .components import PageFrame
@@ -167,7 +169,7 @@ class App(ctk.CTk):
         ctk.CTkFrame(self._sidebar, fg_color=SIDEBAR_DIVIDER,
                      height=1).pack(fill="x", padx=12, pady=(6, 2))
 
-        # ── Bottom-anchored: logout + user info (pack before nav so they're always visible)
+        # ── Bottom-anchored: logout + updates + user info (pack before nav)
         ctk.CTkButton(
             self._sidebar, text="⎋ Cerrar sesión",
             font=font(FONT_SCALE['xs']), text_color=SIDEBAR_TEXT,
@@ -175,6 +177,18 @@ class App(ctk.CTk):
             height=28, corner_radius=6, anchor="center",
             command=self._on_logout
         ).pack(side="bottom", fill="x", padx=8, pady=(0, 8))
+
+        ctk.CTkButton(
+            self._sidebar, text="⬇ Buscar actualización",
+            font=font(FONT_SCALE['xs']), text_color=SIDEBAR_TEXT,
+            fg_color="transparent", hover_color=SIDEBAR_HOVER,
+            height=28, corner_radius=6, anchor="center",
+            command=self._on_check_updates
+        ).pack(side="bottom", fill="x", padx=8, pady=(0, 2))
+        ctk.CTkLabel(
+            self._sidebar, text=f"v{APP_VERSION}",
+            font=font(FONT_SCALE['xs']), text_color=SIDEBAR_TEXT
+        ).pack(side="bottom", fill="x", padx=12, pady=(0, 2))
 
         if self.auth_result and self.auth_result.success:
             user_frame = ctk.CTkFrame(self._sidebar, fg_color=SIDEBAR_HOVER,
@@ -630,9 +644,8 @@ class App(ctk.CTk):
         messagebox.showerror("Firebase", msg)
 
     def _auto_connect_firebase(self):
-        from config import SERVICE_ACCOUNT_KEY_PATH
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        key_path = os.path.join(app_dir, SERVICE_ACCOUNT_KEY_PATH)
+        from config import service_account_key_path
+        key_path = service_account_key_path()
         if not os.path.exists(key_path):
             self.set_status("No se encontró clave de servicio Firebase", 0)
             return
@@ -1243,6 +1256,79 @@ class App(ctk.CTk):
         self.destroy()
         _show_login()
 
+    def _on_check_updates(self):
+        """Check Hosting manifest and offer download when a newer build exists."""
+        self.set_status("Buscando actualizaciones…", 0.2)
+
+        def work():
+            try:
+                info = update_service.fetch_latest()
+                self.after(0, lambda: self._on_update_info(info))
+            except Exception as e:
+                self.after(0, lambda: self._on_update_error(str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_error(self, msg: str):
+        self.set_status("No se pudo comprobar actualizaciones", 0)
+        messagebox.showerror("Actualizaciones", f"No se pudo consultar el servidor:\n{msg}")
+
+    def _on_update_info(self, info):
+        self.set_status("Listo", 1)
+        if not info.version:
+            messagebox.showwarning("Actualizaciones", "Manifiesto de versión inválido.")
+            return
+        if not info.is_newer:
+            messagebox.showinfo(
+                "Actualizaciones",
+                f"Ya tienes la última versión ({APP_VERSION}).\n"
+                f"Publicada en servidor: {info.version}",
+            )
+            return
+
+        notes = info.notes or "(Sin notas)"
+        if not messagebox.askyesno(
+            "Actualización disponible",
+            f"Hay una nueva versión: {info.version}\n"
+            f"Tu versión: {APP_VERSION}\n\n"
+            f"{notes}\n\n¿Descargar ahora?",
+        ):
+            return
+
+        self.set_status("Descargando actualización…", 0.1)
+
+        def progress(msg, frac):
+            self.after(0, lambda: self.set_status(msg, frac))
+
+        def work():
+            result = update_service.download_update(info, progress=progress)
+            self.after(0, lambda: self._on_update_downloaded(result, info.version))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_downloaded(self, result, version: str):
+        if not result.success:
+            self.set_status("Error al descargar actualización", 0)
+            messagebox.showerror("Actualizaciones", result.message)
+            return
+
+        self.set_status(result.message, 1)
+        launch = messagebox.askyesno(
+            "Descarga completa",
+            f"{result.message}\n\n"
+            f"Archivo: {result.exe_path or result.zip_path}\n\n"
+            "¿Abrir el instalador ahora?\n"
+            "(Cierra esta aplicación antes de instalar.)",
+        )
+        if launch and result.exe_path:
+            try:
+                update_service.launch_installer(result.exe_path)
+            except Exception as e:
+                messagebox.showerror("Actualizaciones", f"No se pudo abrir el instalador:\n{e}")
+                update_service.open_folder(result.folder or result.exe_path)
+        else:
+            update_service.open_folder(result.folder or result.zip_path)
+
     def _invalidate_pages(self):
         """Clear cached page instances so they re-render with fresh data."""
         if self._active_page and hasattr(self._active_page, "stop"):
@@ -1259,30 +1345,40 @@ class LoginWindow(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Reacudo Legal — Iniciar Sesión")
-        self.geometry("420x520")
+        self.geometry("420x600")
         self.resizable(False, False)
         self.configure(fg_color=SIDEBAR_BG)
 
         self.auth_service = AuthService()
         self.firebase = FirebaseService()
+        self._firebase_ready = False
+        self._firebase_error = ""
         self._init_firebase()
         self._build()
 
         # Center
         self.update_idletasks()
         x = (self.winfo_screenwidth() // 2) - (210)
-        y = (self.winfo_screenheight() // 2) - (260)
+        y = (self.winfo_screenheight() // 2) - (300)
         self.geometry(f"+{x}+{y}")
 
     def _init_firebase(self):
-        from config import SERVICE_ACCOUNT_KEY_PATH
-        app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        key_path = os.path.join(app_dir, SERVICE_ACCOUNT_KEY_PATH)
-        if os.path.exists(key_path):
-            try:
-                self.firebase.initialize(key_path)
-            except Exception:
-                pass
+        from config import service_account_key_path
+        key_path = service_account_key_path()
+        if not os.path.exists(key_path):
+            self._firebase_ready = False
+            self._firebase_error = (
+                "No se encontró la clave de servicio Firebase embebida. "
+                "Reinstale la aplicación o use 'Buscar actualización'."
+            )
+            return
+        try:
+            self.firebase.initialize(key_path)
+            self._firebase_ready = True
+            self._firebase_error = ""
+        except Exception as e:
+            self._firebase_ready = False
+            self._firebase_error = str(e)
 
     def _build(self):
         # Top area — dark with brand
@@ -1329,11 +1425,29 @@ class LoginWindow(ctk.CTk):
                                        text_color=DANGER, wraplength=320)
         self._error_lbl.pack(pady=(0, 4))
 
+        if not self._firebase_ready and self._firebase_error:
+            self._error_lbl.configure(
+                text="Firebase Admin no disponible. El login requiere la clave de servicio."
+            )
+
         self._btn_login = ctk.CTkButton(
             inner, text="Ingresar", font=font(14, "bold"),
             fg_color=ACCENT, hover_color=ACCENT_HOVER,
             height=44, corner_radius=10, command=self._on_login)
         self._btn_login.pack(fill="x")
+
+        self._btn_update = ctk.CTkButton(
+            inner, text="⬇ Buscar actualización",
+            font=font(12), fg_color="transparent",
+            hover_color=BORDER, text_color=TEXT_SECONDARY,
+            height=34, corner_radius=8, border_width=1, border_color=BORDER,
+            command=self._on_check_updates)
+        self._btn_update.pack(fill="x", pady=(10, 0))
+
+        self._version_lbl = ctk.CTkLabel(
+            inner, text=f"Versión {APP_VERSION}",
+            font=font(10), text_color=TEXT_SECONDARY)
+        self._version_lbl.pack(pady=(8, 0))
 
         self._password.bind("<Return>", lambda e: self._on_login())
         self._email.bind("<Return>", lambda e: self._password.focus())
@@ -1344,6 +1458,14 @@ class LoginWindow(ctk.CTk):
         password = self._password.get().strip()
         if not email or not password:
             self._error_lbl.configure(text="Ingrese correo y contraseña")
+            return
+
+        if not self._firebase_ready:
+            detail = self._firebase_error or "clave de servicio no encontrada"
+            self._error_lbl.configure(
+                text=f"No se puede iniciar sesión: Firebase Admin no está listo ({detail}). "
+                     "Use 'Buscar actualización' o reinstale la app."
+            )
             return
 
         self._btn_login.configure(state="disabled", text="Verificando…")
@@ -1362,6 +1484,78 @@ class LoginWindow(ctk.CTk):
         self.destroy()
         app = App(auth_result=result)
         app.mainloop()
+
+    def _on_check_updates(self):
+        self._btn_update.configure(state="disabled", text="Buscando…")
+        self._error_lbl.configure(text="")
+
+        def work():
+            try:
+                info = update_service.fetch_latest()
+                self.after(0, lambda: self._on_update_info(info))
+            except Exception as e:
+                self.after(0, lambda: self._on_update_fail(str(e)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_fail(self, msg: str):
+        self._btn_update.configure(state="normal", text="⬇ Buscar actualización")
+        self._error_lbl.configure(text=f"No se pudo buscar actualización: {msg}")
+
+    def _on_update_info(self, info):
+        self._btn_update.configure(state="normal", text="⬇ Buscar actualización")
+        if not info.version:
+            self._error_lbl.configure(text="Manifiesto de versión inválido.")
+            return
+        if not info.is_newer:
+            messagebox.showinfo(
+                "Actualizaciones",
+                f"Ya tienes la última versión ({APP_VERSION}).\n"
+                f"Publicada en servidor: {info.version}",
+            )
+            return
+
+        notes = info.notes or "(Sin notas)"
+        if not messagebox.askyesno(
+            "Actualización disponible",
+            f"Hay una nueva versión: {info.version}\n"
+            f"Tu versión: {APP_VERSION}\n\n"
+            f"{notes}\n\n¿Descargar ahora?",
+        ):
+            return
+
+        self._btn_update.configure(state="disabled", text="Descargando…")
+
+        def progress(msg, _frac):
+            self.after(0, lambda: self._btn_update.configure(text=msg[:28]))
+
+        def work():
+            result = update_service.download_update(info, progress=progress)
+            self.after(0, lambda: self._on_update_downloaded(result))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_update_downloaded(self, result):
+        self._btn_update.configure(state="normal", text="⬇ Buscar actualización")
+        if not result.success:
+            self._error_lbl.configure(text=result.message)
+            messagebox.showerror("Actualizaciones", result.message)
+            return
+
+        launch = messagebox.askyesno(
+            "Descarga completa",
+            f"{result.message}\n\n"
+            f"Archivo: {result.exe_path or result.zip_path}\n\n"
+            "¿Abrir el instalador ahora?",
+        )
+        if launch and result.exe_path:
+            try:
+                update_service.launch_installer(result.exe_path)
+            except Exception as e:
+                messagebox.showerror("Actualizaciones", f"No se pudo abrir el instalador:\n{e}")
+                update_service.open_folder(result.folder or result.exe_path)
+        else:
+            update_service.open_folder(result.folder or result.zip_path)
 
 
 def _show_login():

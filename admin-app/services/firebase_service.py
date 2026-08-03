@@ -42,12 +42,14 @@ class FirebaseService:
         if self._initialized:
             return True
         
-        key_path = service_key_path or SERVICE_ACCOUNT_KEY_PATH
-        
-        # Check if path is relative; resolve from app directory
-        if not os.path.isabs(key_path):
-            app_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            key_path = os.path.join(app_dir, key_path)
+        if service_key_path:
+            key_path = service_key_path
+            if not os.path.isabs(key_path):
+                from config import resource_path
+                key_path = resource_path(key_path)
+        else:
+            from config import service_account_key_path
+            key_path = service_account_key_path()
         
         if not os.path.exists(key_path):
             raise FileNotFoundError(

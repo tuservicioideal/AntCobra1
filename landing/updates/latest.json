@@ -1,10 +1,10 @@
 {
-  "version": "1.0.23",
-  "filename": "Cobranzas-Setup-1.0.23.exe",
-  "url": "https://clase-001.web.app/updates/Cobranzas-Setup-1.0.23.zip",
-  "sha256": "7571ed64f7c7d996d28621b0d9cf879f04859937f2d3b6672c411d02b17d226c",
-  "notes": "Scroll del inbox WhatsApp (lista e historial), puente Meta y mejoras de estabilidad.",
+  "version": "1.0.24",
+  "filename": "Cobranzas-Setup-1.0.24.exe",
+  "url": "https://clase-001.web.app/updates/Cobranzas-Setup-1.0.24.zip",
+  "sha256": "9dffe2be2b3fb65d71e694fc23ac220d9d8155f95a4893a5050735aae50f1d54",
+  "notes": "Corrige bloqueo de login (SyntaxError + init Firebase) y agrega descarga de actualizaciones desde la app.",
   "min_version": "1.0.23",
-  "published_at": "2026-07-30T22:54:28Z",
-  "package": "Cobranzas-Setup-1.0.23.zip"
+  "published_at": "2026-08-03T04:58:57Z",
+  "package": "Cobranzas-Setup-1.0.24.zip"
 }

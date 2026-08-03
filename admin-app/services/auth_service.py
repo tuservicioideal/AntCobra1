@@ -40,7 +40,7 @@ class AuthResult:
         self.activo = activo
         self.error = error
 
-    // Role helpers (same as Flutter/Web)
+    # Role helpers (same as Flutter/Web)
     @property
     def can_manage_users(self) -> bool:
         return self.rol in ("admin", "supervisor")

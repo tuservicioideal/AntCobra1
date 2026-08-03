@@ -74,6 +74,7 @@ a = Analysis(
         'services.reparto_planner',
         'services.firebase_service',
         'services.auth_service',
+        'services.update_service',
         'services.campaign_manager',
         'services.database',
         'services.diff_engine',

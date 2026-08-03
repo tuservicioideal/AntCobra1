@@ -1,6 +1,9 @@
 # Firebase Configuration
 # Project: clase-001
 
+import os as _os
+import sys as _sys
+
 FIREBASE_CONFIG = {
     "apiKey": "AIzaSyBubpxyyN2YvcPaU6WUJkrF2IQUOzFVYWg",
     "authDomain": "clase-001.firebaseapp.com",
@@ -15,11 +18,28 @@ FIREBASE_CONFIG = {
 # Download from: Firebase Console > Project Settings > Service Accounts > Generate New Private Key
 SERVICE_ACCOUNT_KEY_PATH = "clase-001-firebase-adminsdk-fbsvc-ee190f0bcc.json"
 
+# Desktop app version (must match landing/updates/latest.json on release)
+APP_VERSION = "1.0.24"
+UPDATE_MANIFEST_URL = "https://clase-001.web.app/updates/latest.json"
+
 # ── Database Configuration ──────────────────────────────────────
-import os as _os
 _APP_DIR = _os.path.dirname(_os.path.abspath(__file__))
 DATABASE_DIR = _os.path.join(_APP_DIR, "data")
 DATABASE_PATH = _os.path.join(DATABASE_DIR, "antcobranzas.db")
+
+
+def resource_path(relative: str) -> str:
+    """Resolve a path bundled with the app (PyInstaller _MEIPASS or source tree)."""
+    if getattr(_sys, "frozen", False) and hasattr(_sys, "_MEIPASS"):
+        return _os.path.join(_sys._MEIPASS, relative)
+    return _os.path.join(_APP_DIR, relative)
+
+
+def service_account_key_path() -> str:
+    """Absolute path to the Firebase service-account JSON."""
+    if _os.path.isabs(SERVICE_ACCOUNT_KEY_PATH):
+        return SERVICE_ACCOUNT_KEY_PATH
+    return resource_path(SERVICE_ACCOUNT_KEY_PATH)
 
 # ── Tramo / Campaign Thresholds ─────────────────────────────────
 UMBRAL_MINIMO_GESTION = 10.0    # S/ — Saldo mínimo para seguir en cobranza

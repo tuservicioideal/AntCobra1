@@ -79,6 +79,7 @@ a = Analysis(
         'services.database',
         'services.diff_engine',
         'services.excel_parser',
+        'services.territorial_utils',
         'services.tramo_engine',
         'services.word_generator',
         'services.word_template_engine',

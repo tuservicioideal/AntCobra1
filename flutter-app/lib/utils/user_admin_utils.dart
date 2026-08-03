@@ -1,5 +1,7 @@
 /// Pure helpers for user administration (mirrors admin-app / Cloud Functions logic).
 
+import 'territorial_utils.dart';
+
 const validUserRoles = ['gestor', 'asistente', 'supervisor', 'admin'];
 const validCanales = ['campo', 'call'];
 
@@ -95,14 +97,10 @@ BuiltSecciones buildSecciones({
         .toSet()
         .toList()
       ..sort();
-    if (finalSecciones.isNotEmpty) {
-      final parts = finalSecciones.first.split('_');
-      if (parts.length == 3) {
-        if (finalRegion.isEmpty) finalRegion = parts[0];
-        if (finalZona.isEmpty) finalZona = parts[1];
-        if (finalSeccion.isEmpty) finalSeccion = parts[2].toUpperCase();
-      }
-    }
+    final legacy = legacyFieldsFromSecciones(finalSecciones);
+    finalRegion = legacy.region;
+    finalZona = legacy.zona;
+    finalSeccion = legacy.seccionLetter;
   } else if (finalRegion.isNotEmpty &&
       finalZona.isNotEmpty &&
       finalSeccion.isNotEmpty) {

@@ -4,9 +4,19 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 from ..theme import *
 from ..components import SectionHeader
+from services.territorial_utils import (
+    count_secciones_in_region,
+    count_secciones_in_zona,
+    group_secciones_by_hierarchy,
+    legacy_fields_from_secciones,
+    parse_composite_section_key,
+    remove_region,
+    remove_seccion,
+    remove_zona,
+)
 
 if TYPE_CHECKING:
     from ..app import App
@@ -319,12 +329,161 @@ class TeamPage:
                       height=28, width=80, corner_radius=6,
                       command=lambda _u=u: self._edit_user(_u)
                       ).pack(side="left", padx=(0, 4))
+        show_territorio = (
+            rol in ("gestor", "asistente")
+            and u.get("canal", "campo") != "call"
+        )
+        if show_territorio:
+            ctk.CTkButton(btn_row, text="🗺️ Territorio",
+                          font=font(FONT_SCALE['xs']), fg_color="#EEF2FF",
+                          text_color="#4338CA", hover_color="#C7D2FE",
+                          height=28, width=96, corner_radius=6,
+                          command=lambda _u=u: self._edit_user(_u)
+                          ).pack(side="left", padx=(0, 4))
         ctk.CTkButton(btn_row, text="🗑 Eliminar",
                       font=font(FONT_SCALE['xs']), fg_color=DANGER_LIGHT,
                       text_color=DANGER, hover_color="#FCA5A5",
                       height=28, width=84, corner_radius=6,
                       command=lambda _uid=uid, _n=nombre: self._delete_user(_uid, _n)
                       ).pack(side="left")
+
+    def _mount_assigned_territory_panel(
+        self,
+        parent: ctk.CTkBaseClass,
+        selected_keys: list[str],
+        on_changed: Callable[[], None],
+    ) -> Callable[[], None]:
+        """Mount hierarchical Región→Zona→Sección tree. Returns refresh()."""
+        ctk.CTkLabel(
+            parent,
+            text="Territorio asignado (quitar por región, zona o sección)",
+            font=font(11, "bold"),
+            text_color=TEXT_PRIMARY,
+        ).pack(padx=16, anchor="w", pady=(10, 0))
+        ctk.CTkLabel(
+            parent,
+            text="Quitar territorio no mueve clientes; solo deja de asignar esa zona/sección al gestor.",
+            font=font(9),
+            text_color=TEXT_MUTED,
+            wraplength=420,
+            justify="left",
+        ).pack(padx=16, anchor="w", pady=(2, 0))
+
+        tree_frame = ctk.CTkFrame(
+            parent, fg_color="#F8FAFC", corner_radius=8,
+            border_width=1, border_color=BORDER,
+        )
+        tree_frame.pack(fill="x", padx=16, pady=(6, 0))
+
+        def _confirm_bulk(count: int, label: str) -> bool:
+            if count <= 1:
+                return True
+            return bool(messagebox.askyesno(
+                "Quitar territorio",
+                f"Se quitarán {count} secciones de {label}.\n¿Continuar?",
+            ))
+
+        def _apply_keys(new_keys: list[str]) -> None:
+            selected_keys.clear()
+            selected_keys.extend(new_keys)
+            refresh()
+            on_changed()
+
+        def refresh() -> None:
+            for w in tree_frame.winfo_children():
+                w.destroy()
+            hierarchy = group_secciones_by_hierarchy(selected_keys)
+            if not hierarchy:
+                ctk.CTkLabel(
+                    tree_frame,
+                    text="  Ningún territorio compuesto asignado",
+                    font=font(10),
+                    text_color=TEXT_MUTED,
+                ).pack(padx=8, pady=8, anchor="w")
+                return
+
+            for region, zonas in hierarchy.items():
+                region_row = ctk.CTkFrame(tree_frame, fg_color="transparent")
+                region_row.pack(fill="x", padx=8, pady=(6, 2))
+                ctk.CTkLabel(
+                    region_row,
+                    text=f"Región {region}",
+                    font=font(11, "bold"),
+                    text_color=TEXT_PRIMARY,
+                ).pack(side="left")
+                n_reg = count_secciones_in_region(selected_keys, region)
+                ctk.CTkButton(
+                    region_row,
+                    text="Quitar región",
+                    font=font(9),
+                    height=24,
+                    width=100,
+                    corner_radius=6,
+                    fg_color=DANGER_LIGHT,
+                    text_color=DANGER,
+                    hover_color="#FCA5A5",
+                    command=lambda r=region, n=n_reg: (
+                        _apply_keys(remove_region(selected_keys, r))
+                        if _confirm_bulk(n, f"la región {r}") else None
+                    ),
+                ).pack(side="right")
+
+                for zona, secs in sorted(zonas.items()):
+                    zona_row = ctk.CTkFrame(tree_frame, fg_color="transparent")
+                    zona_row.pack(fill="x", padx=20, pady=(2, 0))
+                    ctk.CTkLabel(
+                        zona_row,
+                        text=f"Zona {zona}",
+                        font=font(10, "bold"),
+                        text_color=TEXT_SECONDARY,
+                    ).pack(side="left")
+                    n_zona = count_secciones_in_zona(selected_keys, region, zona)
+                    ctk.CTkButton(
+                        zona_row,
+                        text="Quitar zona",
+                        font=font(9),
+                        height=22,
+                        width=90,
+                        corner_radius=6,
+                        fg_color="#FEF3C7",
+                        text_color="#B45309",
+                        hover_color="#FDE68A",
+                        command=lambda r=region, z=zona, n=n_zona: (
+                            _apply_keys(remove_zona(selected_keys, r, z))
+                            if _confirm_bulk(n, f"la zona {r}/{z}") else None
+                        ),
+                    ).pack(side="right")
+
+                    secs_row = ctk.CTkFrame(tree_frame, fg_color="transparent")
+                    secs_row.pack(fill="x", padx=36, pady=(2, 4))
+                    for key in secs:
+                        parsed = parse_composite_section_key(key)
+                        letter = parsed[2] if parsed else key
+                        chip = ctk.CTkFrame(secs_row, fg_color=ACCENT_LIGHT, corner_radius=6)
+                        chip.pack(side="left", padx=2, pady=2)
+                        ctk.CTkLabel(
+                            chip,
+                            text=f" {letter} ",
+                            font=font(10, "bold"),
+                            text_color=ACCENT,
+                        ).pack(side="left", padx=(4, 0))
+                        ctk.CTkButton(
+                            chip,
+                            text="✕",
+                            font=font(9),
+                            width=20,
+                            height=20,
+                            fg_color="transparent",
+                            hover_color=DANGER,
+                            text_color=DANGER,
+                            corner_radius=4,
+                            command=lambda k=key: _apply_keys(
+                                remove_seccion(selected_keys, k)
+                            ),
+                        ).pack(side="left", padx=(0, 2))
+
+        refresh()
+        return refresh
 
     def _new_user(self):
         dialog = ctk.CTkToplevel(self._container)
@@ -479,7 +638,7 @@ class TeamPage:
                                          font=font(10), text_color=TEXT_MUTED)
         chips_placeholder.pack(padx=8, pady=6, anchor="w")
 
-        def _render_chips():
+        def _paint_chips():
             for w in chips_frame.winfo_children():
                 w.destroy()
             if not selected_keys:
@@ -503,9 +662,17 @@ class TeamPage:
                               text_color=DANGER, corner_radius=4,
                               command=lambda k=key: _remove_chip(k)).pack(side="left", padx=(0, 2))
 
+        refresh_territory_tree = self._mount_assigned_territory_panel(
+            sec_wrap, selected_keys, _paint_chips,
+        )
+
+        def _render_chips():
+            _paint_chips()
+            refresh_territory_tree()
+
         def _remove_chip(key):
             if key in selected_keys:
-                selected_keys.remove(key)
+                selected_keys[:] = remove_seccion(selected_keys, key)
                 _render_chips()
 
         def _add_section():
@@ -641,12 +808,7 @@ class TeamPage:
                 return
 
             # Derive region/zona/seccion from first selected key for backward compat
-            region, zona, seccion = "", "", ""
-            if selected_keys:
-                parts = selected_keys[0].split("_")
-                if len(parts) == 3:
-                    region, zona, seccion = parts
-
+            region, zona, seccion = legacy_fields_from_secciones(selected_keys)
             btn_save.configure(state="disabled", text="Creando…")
 
             def do_create():
@@ -811,7 +973,7 @@ class TeamPage:
                                    border_width=1, border_color=BORDER)
         chips_frame.pack(fill="x", padx=16, pady=(6, 0))
 
-        def _render_chips():
+        def _paint_chips():
             for w in chips_frame.winfo_children():
                 w.destroy()
             if not selected_keys:
@@ -835,9 +997,22 @@ class TeamPage:
                               text_color=DANGER, corner_radius=4,
                               command=lambda k=key: _remove_chip(k)).pack(side="left", padx=(0, 2))
 
+        is_call_user = (
+            user_data.get("rol") == "gestor" and user_data.get("canal") == "call"
+        )
+        refresh_territory_tree = (lambda: None)
+        if not is_call_user:
+            refresh_territory_tree = self._mount_assigned_territory_panel(
+                scroll, selected_keys, _paint_chips,
+            )
+
+        def _render_chips():
+            _paint_chips()
+            refresh_territory_tree()
+
         def _remove_chip(key):
             if key in selected_keys:
-                selected_keys.remove(key)
+                selected_keys[:] = remove_seccion(selected_keys, key)
                 _render_chips()
 
         def _add_section():
@@ -981,17 +1156,24 @@ class TeamPage:
 
             # Section updates from multi-select
             if sorted(selected_keys) != sorted(current_keys):
+                rol = role_var.get()
+                is_call = (
+                    rol == "gestor" and user_data.get("canal", "campo") == "call"
+                )
+                needs_sections = (
+                    rol == "asistente"
+                    or (rol == "gestor" and not is_call)
+                )
+                if needs_sections and not selected_keys:
+                    msg_lbl.configure(
+                        text="Gestores de campo y asistentes requieren al menos una sección."
+                    )
+                    return
                 updates["secciones"] = sorted(selected_keys)
-                if selected_keys:
-                    parts = selected_keys[0].split("_")
-                    if len(parts) == 3:
-                        updates["region"] = parts[0]
-                        updates["zona"] = parts[1]
-                        updates["seccion"] = parts[2]
-                else:
-                    updates["region"] = ""
-                    updates["zona"] = ""
-                    updates["seccion"] = ""
+                region, zona, seccion = legacy_fields_from_secciones(selected_keys)
+                updates["region"] = region
+                updates["zona"] = zona
+                updates["seccion"] = seccion
 
             if not updates:
                 msg_lbl.configure(text="No hay cambios")

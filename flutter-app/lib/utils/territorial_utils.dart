@@ -81,3 +81,91 @@ String userTerritorialLabel(UserModel user) {
   if (user.seccion.isNotEmpty) return 'Sección ${user.seccion}';
   return '';
 }
+
+/// Groups composite keys as Región → Zona → [composite keys].
+/// Non-composite keys (e.g. `_CALL_…`) are omitted.
+Map<String, Map<String, List<String>>> groupSeccionesByHierarchy(
+  Iterable<String> keys,
+) {
+  final result = <String, Map<String, List<String>>>{};
+  for (final raw in keys) {
+    final parts = parseCompositeSectionKey(raw);
+    if (parts == null) continue;
+    final key = buildCompositeSectionKey(
+      parts.region,
+      parts.zona,
+      parts.seccionLetter,
+    );
+    if (key.isEmpty) continue;
+    final zonas = result.putIfAbsent(parts.region, () => {});
+    final secs = zonas.putIfAbsent(parts.zona, () => <String>[]);
+    if (!secs.contains(key)) secs.add(key);
+  }
+  for (final zonas in result.values) {
+    for (final secs in zonas.values) {
+      secs.sort();
+    }
+  }
+  return Map.fromEntries(
+    result.entries.toList()..sort((a, b) => a.key.compareTo(b.key)),
+  );
+}
+
+/// Removes every composite key belonging to [region].
+List<String> removeRegion(List<String> keys, String region) {
+  final r = region.trim();
+  return keys.where((k) {
+    final parts = parseCompositeSectionKey(k);
+    if (parts == null) return true;
+    return parts.region != r;
+  }).toList();
+}
+
+/// Removes every composite key belonging to [region]/[zona].
+List<String> removeZona(List<String> keys, String region, String zona) {
+  final r = region.trim();
+  final z = zona.trim();
+  return keys.where((k) {
+    final parts = parseCompositeSectionKey(k);
+    if (parts == null) return true;
+    return parts.region != r || parts.zona != z;
+  }).toList();
+}
+
+/// Removes a single composite (or exact) key.
+List<String> removeSeccion(List<String> keys, String key) {
+  final target = key.trim();
+  return keys.where((k) => k.trim() != target).toList();
+}
+
+/// How many composite keys match a region.
+int countSeccionesInRegion(Iterable<String> keys, String region) {
+  final r = region.trim();
+  return keys.where((k) {
+    final parts = parseCompositeSectionKey(k);
+    return parts != null && parts.region == r;
+  }).length;
+}
+
+/// How many composite keys match a region+zona.
+int countSeccionesInZona(
+  Iterable<String> keys,
+  String region,
+  String zona,
+) {
+  final r = region.trim();
+  final z = zona.trim();
+  return keys.where((k) {
+    final parts = parseCompositeSectionKey(k);
+    return parts != null && parts.region == r && parts.zona == z;
+  }).length;
+}
+
+/// Derives legacy `region` / `zona` / `seccion` from the first remaining key.
+TerritorialParts legacyFieldsFromSecciones(Iterable<String> keys) {
+  for (final raw in keys) {
+    final parts = parseCompositeSectionKey(raw);
+    if (parts != null) return parts;
+  }
+  return const TerritorialParts(region: '', zona: '', seccionLetter: '');
+}

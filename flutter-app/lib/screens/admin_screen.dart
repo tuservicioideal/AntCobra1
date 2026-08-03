@@ -380,6 +380,13 @@ class _AdminScreenState extends State<AdminScreen> {
                     icon: const Icon(Icons.edit_outlined, size: 18),
                     onPressed: _saving ? null : () => _showUserDialog(user),
                   ),
+                  if (_canManageTerritory(user))
+                    IconButton(
+                      tooltip: 'Quitar territorio',
+                      icon: const Icon(Icons.map_outlined, size: 18),
+                      onPressed:
+                          _saving ? null : () => _showUserDialog(user),
+                    ),
                   IconButton(
                     tooltip: user.activo ? 'Desactivar' : 'Activar',
                     icon: Icon(
@@ -533,6 +540,17 @@ class _AdminScreenState extends State<AdminScreen> {
                 ],
               ),
             ),
+            if (_canManageTerritory(user))
+              const PopupMenuItem(
+                value: 'territory',
+                child: Row(
+                  children: [
+                    Icon(Icons.map_outlined, size: 18),
+                    SizedBox(width: 8),
+                    Text('Quitar territorio'),
+                  ],
+                ),
+              ),
             const PopupMenuItem(
               value: 'delete',
               child: Row(
@@ -606,10 +624,14 @@ class _AdminScreenState extends State<AdminScreen> {
     }
   }
 
+  bool _canManageTerritory(UserModel user) {
+    return shouldShowTerritorialPicker(user.rol, user.canal);
+  }
+
   void _handleUserAction(String action, UserModel user) {
     if (action == 'toggle_activo') {
       _toggleActivo(user);
-    } else if (action == 'edit') {
+    } else if (action == 'edit' || action == 'territory') {
       _showUserDialog(user);
     } else if (action == 'delete') {
       _confirmDelete(user);

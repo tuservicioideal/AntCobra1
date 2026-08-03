@@ -19,7 +19,7 @@ FIREBASE_CONFIG = {
 SERVICE_ACCOUNT_KEY_PATH = "clase-001-firebase-adminsdk-fbsvc-ee190f0bcc.json"
 
 # Desktop app version (must match landing/updates/latest.json on release)
-APP_VERSION = "1.0.24"
+APP_VERSION = "1.0.25"
 UPDATE_MANIFEST_URL = "https://clase-001.web.app/updates/latest.json"
 
 # ── Database Configuration ──────────────────────────────────────

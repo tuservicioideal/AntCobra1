@@ -1,10 +1,10 @@
 {
-  "version": "1.0.24",
-  "filename": "Cobranzas-Setup-1.0.24.exe",
-  "url": "https://clase-001.web.app/updates/Cobranzas-Setup-1.0.24.zip",
-  "sha256": "9dffe2be2b3fb65d71e694fc23ac220d9d8155f95a4893a5050735aae50f1d54",
-  "notes": "Corrige bloqueo de login (SyntaxError + init Firebase) y agrega descarga de actualizaciones desde la app.",
-  "min_version": "1.0.23",
-  "published_at": "2026-08-03T04:58:57Z",
-  "package": "Cobranzas-Setup-1.0.24.zip"
+  "version": "1.0.25",
+  "filename": "Cobranzas-Setup-1.0.25.exe",
+  "url": "https://clase-001.web.app/updates/Cobranzas-Setup-1.0.25.zip",
+  "sha256": "6e3450776c3aa5791eb44be6a04fceb95fde61302da5bf43271c3f5db62ad12d",
+  "notes": "Boton Actualizar app en login/sidebar. Incluye descarga e instalacion automatica desde Hosting.",
+  "min_version": "1.0.24",
+  "published_at": "2026-08-03T05:51:47Z",
+  "package": "Cobranzas-Setup-1.0.25.zip"
 }

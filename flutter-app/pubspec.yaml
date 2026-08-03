@@ -1,7 +1,7 @@
 name: app_recaudo_legal
 description: App Recaudo Legal — Gestión de Cobranzas en Campo
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.1+2
 
 environment:
   sdk: ^3.6.0
@@ -43,10 +43,12 @@ dependencies:
 
   # Utils
   http: ^1.2.2
+  crypto: ^3.0.6
   intl: ^0.20.2
   url_launcher: ^6.3.1
   shared_preferences: ^2.3.5
   path_provider: ^2.1.5
+  package_info_plus: ^8.3.0
   open_filex: ^4.5.0
   share_plus: ^10.1.4
   printing: ^5.14.2

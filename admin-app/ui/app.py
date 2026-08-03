@@ -179,7 +179,7 @@ class App(ctk.CTk):
         ).pack(side="bottom", fill="x", padx=8, pady=(0, 8))
 
         ctk.CTkButton(
-            self._sidebar, text="⬇ Buscar actualización",
+            self._sidebar, text="⬇ Actualizar app",
             font=font(FONT_SCALE['xs']), text_color=SIDEBAR_TEXT,
             fg_color="transparent", hover_color=SIDEBAR_HOVER,
             height=28, corner_radius=6, anchor="center",
@@ -1369,7 +1369,7 @@ class LoginWindow(ctk.CTk):
             self._firebase_ready = False
             self._firebase_error = (
                 "No se encontró la clave de servicio Firebase embebida. "
-                "Reinstale la aplicación o use 'Buscar actualización'."
+                "Reinstale la aplicación o use 'Actualizar app'."
             )
             return
         try:
@@ -1437,7 +1437,7 @@ class LoginWindow(ctk.CTk):
         self._btn_login.pack(fill="x")
 
         self._btn_update = ctk.CTkButton(
-            inner, text="⬇ Buscar actualización",
+            inner, text="⬇ Actualizar app",
             font=font(12), fg_color="transparent",
             hover_color=BORDER, text_color=TEXT_SECONDARY,
             height=34, corner_radius=8, border_width=1, border_color=BORDER,
@@ -1464,7 +1464,7 @@ class LoginWindow(ctk.CTk):
             detail = self._firebase_error or "clave de servicio no encontrada"
             self._error_lbl.configure(
                 text=f"No se puede iniciar sesión: Firebase Admin no está listo ({detail}). "
-                     "Use 'Buscar actualización' o reinstale la app."
+                     "Use 'Actualizar app' o reinstale la app."
             )
             return
 
@@ -1499,11 +1499,11 @@ class LoginWindow(ctk.CTk):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_update_fail(self, msg: str):
-        self._btn_update.configure(state="normal", text="⬇ Buscar actualización")
+        self._btn_update.configure(state="normal", text="⬇ Actualizar app")
         self._error_lbl.configure(text=f"No se pudo buscar actualización: {msg}")
 
     def _on_update_info(self, info):
-        self._btn_update.configure(state="normal", text="⬇ Buscar actualización")
+        self._btn_update.configure(state="normal", text="⬇ Actualizar app")
         if not info.version:
             self._error_lbl.configure(text="Manifiesto de versión inválido.")
             return
@@ -1536,7 +1536,7 @@ class LoginWindow(ctk.CTk):
         threading.Thread(target=work, daemon=True).start()
 
     def _on_update_downloaded(self, result):
-        self._btn_update.configure(state="normal", text="⬇ Buscar actualización")
+        self._btn_update.configure(state="normal", text="⬇ Actualizar app")
         if not result.success:
             self._error_lbl.configure(text=result.message)
             messagebox.showerror("Actualizaciones", result.message)

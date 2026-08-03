@@ -59,13 +59,6 @@
       ]
     },
     {
-      "collectionGroup": "clientes",
-      "queryScope": "COLLECTION_GROUP",
-      "fields": [
-        { "fieldPath": "estado_gestion", "order": "ASCENDING" }
-      ]
-    },
-    {
       "collectionGroup": "doxeo_jobs",
       "queryScope": "COLLECTION",
       "fields": [
@@ -90,5 +83,34 @@
       ]
     }
   ],
-  "fieldOverrides": []
+  "fieldOverrides": [
+    {
+      "collectionGroup": "clientes",
+      "fieldPath": "numero_documento",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    },
+    {
+      "collectionGroup": "clientes",
+      "fieldPath": "estado_gestion",
+      "indexes": [
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION"
+        },
+        {
+          "order": "ASCENDING",
+          "queryScope": "COLLECTION_GROUP"
+        }
+      ]
+    }
+  ]
 }

@@ -1,0 +1,9 @@
+{
+  "version": "1.0.1",
+  "filename": "app-recaudo-legal-1.0.1.apk",
+  "url": "https://clase-001.web.app/updates/app-recaudo-legal-1.0.1.apk",
+  "sha256": "ac4ed8db09e17b07873a0f6d08c7c528e182ba85167be20800c0d4f26e56c46a",
+  "notes": "Multi-cuenta por DNI (indice Firestore) y boton Actualizar app en Perfil.",
+  "min_version": "1.0.0",
+  "published_at": "2026-08-03T05:38:00Z"
+}

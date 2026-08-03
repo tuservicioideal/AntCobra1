@@ -511,6 +511,7 @@ class FirestoreService {
   }
 
   /// All active accounts sharing the same DNI (collection group query).
+  /// Throws on index/permission/network failure so the UI can surface it.
   Future<List<ClientModel>> getAccountsByDocumento(String numeroDocumento) async {
     if (numeroDocumento.trim().isEmpty) return [];
     try {
@@ -536,8 +537,9 @@ class FirestoreService {
           })
           .where((c) => c.activoEnCartera)
           .toList();
-    } catch (_) {
-      return [];
+    } catch (e, st) {
+      debugPrint('getAccountsByDocumento($numeroDocumento) failed: $e\n$st');
+      rethrow;
     }
   }
 

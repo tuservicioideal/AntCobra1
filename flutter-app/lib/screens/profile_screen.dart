@@ -16,6 +16,8 @@ import '../services/gestor_stats_service.dart';
 
 import '../services/campaign_service.dart';
 
+import '../services/app_update_service.dart';
+
 import '../widgets/campana_banco_filter_bar.dart';
 
 import '../widgets/gestor_profile_stats_panel.dart';
@@ -67,6 +69,10 @@ class _ProfileScreenState extends State<ProfileScreen> {
   Map<String, dynamic>? _campaignData;
 
   CampanaBancoFilterNotifier? _campanaFilterNotifier;
+
+  bool _checkingUpdate = false;
+
+  String? _updateProgressMsg;
 
 
 
@@ -886,6 +892,44 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
                   ),
 
+                  if (supportsApkSelfUpdate) ...[
+
+                    const Divider(height: 1),
+
+                    ListTile(
+
+                      leading: _checkingUpdate
+
+                          ? const SizedBox(
+
+                              width: 24,
+
+                              height: 24,
+
+                              child: CircularProgressIndicator(strokeWidth: 2),
+
+                            )
+
+                          : const Icon(Icons.system_update),
+
+                      title: const Text('Actualizar app'),
+
+                      subtitle: Text(
+
+                        _updateProgressMsg ??
+
+                            'Busca e instala la última versión del APK',
+
+                      ),
+
+                      enabled: !_checkingUpdate,
+
+                      onTap: _checkingUpdate ? null : () => _onCheckAppUpdate(context),
+
+                    ),
+
+                  ],
+
                   const Divider(height: 1),
 
                   ListTile(
@@ -915,6 +959,120 @@ class _ProfileScreenState extends State<ProfileScreen> {
   }
 
 
+
+  Future<void> _onCheckAppUpdate(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    setState(() {
+      _checkingUpdate = true;
+      _updateProgressMsg = 'Consultando servidor…';
+    });
+    final service = AppUpdateService();
+    try {
+      final current = await service.currentVersion();
+      final info = await service.fetchLatest();
+      if (!mounted) return;
+      if (info.version.isEmpty) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('Manifiesto de versión inválido')),
+        );
+        return;
+      }
+      if (!info.isNewerThan(current)) {
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(
+              'Ya tienes la última versión ($current). Servidor: ${info.version}',
+            ),
+          ),
+        );
+        return;
+      }
+      final notes = info.notes.isEmpty ? '(Sin notas)' : info.notes;
+      final confirm = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Actualización disponible'),
+          content: Text(
+            'Hay una nueva versión: ${info.version}\n'
+            'Tu versión: $current\n\n'
+            '$notes\n\n¿Descargar e instalar ahora?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Descargar'),
+            ),
+          ],
+        ),
+      );
+      if (confirm != true || !mounted) return;
+
+      final result = await service.downloadUpdate(
+        info,
+        progress: (msg, frac) {
+          if (!mounted) return;
+          setState(() => _updateProgressMsg = msg);
+        },
+      );
+      if (!mounted) return;
+      if (!result.success || result.apkPath == null) {
+        messenger.showSnackBar(
+          SnackBar(content: Text(result.message)),
+        );
+        return;
+      }
+      final open = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Descarga completa'),
+          content: Text(
+            '${result.message}\n\n'
+            '¿Abrir el instalador ahora?\n'
+            '(Android puede pedir permiso para instalar apps)',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Después'),
+            ),
+            ElevatedButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Instalar'),
+            ),
+          ],
+        ),
+      );
+      if (open == true && result.apkPath != null) {
+        final ok = await service.openInstaller(result.apkPath!);
+        if (!ok && mounted) {
+          messenger.showSnackBar(
+            const SnackBar(
+              content: Text(
+                'No se pudo abrir el instalador. Revisa el permiso de instalar apps.',
+              ),
+            ),
+          );
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        messenger.showSnackBar(
+          SnackBar(content: Text('No se pudo actualizar: $e')),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _checkingUpdate = false;
+          _updateProgressMsg = null;
+        });
+      }
+    }
+  }
 
   void _showLogoutDialog(BuildContext context, AuthService auth) {
 

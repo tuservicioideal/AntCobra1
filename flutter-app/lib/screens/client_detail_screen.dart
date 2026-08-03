@@ -146,6 +146,15 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
       final accounts =
           await _firestoreService.getAccountsByDocumento(_client.numeroDocumento);
       if (mounted) setState(() => _relatedAccounts = accounts);
+    } catch (e) {
+      debugPrint('Error cargando cuentas relacionadas: $e');
+      if (mounted) {
+        setState(() => _relatedAccounts = [_client]);
+        _showSnackbar(
+          'No se pudieron cargar otras cuentas del mismo DNI',
+          isError: true,
+        );
+      }
     } finally {
       if (mounted) setState(() => _loadingRelated = false);
     }
@@ -156,9 +165,18 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
     try {
       List<VisitaHistorial> hist;
       if (_client.numeroDocumento.trim().isNotEmpty) {
-        hist = await _firestoreService.getVisitHistoryByDocumento(
-          numeroDocumento: _client.numeroDocumento,
-        );
+        try {
+          hist = await _firestoreService.getVisitHistoryByDocumento(
+            numeroDocumento: _client.numeroDocumento,
+          );
+        } catch (e) {
+          debugPrint('Historial por DNI falló, usando cuenta actual: $e');
+          hist = await _firestoreService.getVisitHistory(
+            campaignId: widget.campaignId,
+            section: widget.section,
+            clientId: _client.id,
+          );
+        }
       } else {
         hist = await _firestoreService.getVisitHistory(
           campaignId: widget.campaignId,

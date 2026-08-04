@@ -668,8 +668,9 @@ class HistorialVisita(Base):
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
-    cliente_id: Mapped[int] = mapped_column(
-        ForeignKey("clientes.id", ondelete="CASCADE")
+    # Nullable so visit history survives campaign purge (unlink before delete).
+    cliente_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("clientes.id", ondelete="SET NULL"), nullable=True
     )
     campana_id: Mapped[str] = mapped_column(String(100), index=True)
     codigo_cliente: Mapped[str] = mapped_column(String(50), index=True)
@@ -834,7 +835,7 @@ class PlantillaCarta(Base):
 #  DATABASE ENGINE & SESSION MANAGEMENT
 # ══════════════════════════════════════════════════════════════════
 
-CURRENT_SCHEMA_VERSION = 19
+CURRENT_SCHEMA_VERSION = 20
 
 DB_FILENAME = "antcobranzas.db"
 
@@ -1137,6 +1138,107 @@ class DatabaseService:
                 sv.applied_at = datetime.now()
                 sv.description = "v19: etiquetas_catalogo + historial_visita + clientes.etiquetas"
                 session.commit()
+
+            if sv.version < 20:
+                self._migrate_v20(session)
+                sv.version = 20
+                sv.applied_at = datetime.now()
+                sv.description = "v20: historial_visita.cliente_id nullable (SET NULL)"
+                session.commit()
+
+    def _migrate_v20(self, session: Session) -> None:
+        """Rebuild historial_visita so cliente_id is nullable (ON DELETE SET NULL).
+
+        SQLite cannot ALTER FK constraints in place; table rebuild is required
+        so visit history can survive campaign/client purge.
+        """
+        conn = session.connection()
+        text_mod = __import__("sqlalchemy").text
+
+        tables = {
+            row[0]
+            for row in conn.execute(
+                text_mod(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            ).fetchall()
+        }
+        if "historial_visita" not in tables:
+            Base.metadata.create_all(
+                bind=session.connection(),
+                tables=[HistorialVisita.__table__],
+                checkfirst=True,
+            )
+            session.commit()
+            return
+
+        conn.execute(text_mod("PRAGMA foreign_keys=OFF"))
+        try:
+            conn.execute(text_mod(
+                "CREATE TABLE historial_visita_v20 ("
+                "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                "  cliente_id INTEGER,"
+                "  campana_id VARCHAR(100),"
+                "  codigo_cliente VARCHAR(50),"
+                "  event_id VARCHAR(120),"
+                "  fecha_evento DATETIME,"
+                "  estado_gestion VARCHAR(30),"
+                "  nota_gestor TEXT,"
+                "  nivel_1 VARCHAR(100),"
+                "  nivel_2 VARCHAR(100),"
+                "  nivel_3 VARCHAR(100),"
+                "  nivel_4 VARCHAR(100),"
+                "  canal_gestion VARCHAR(10),"
+                "  fecha_promesa_pago VARCHAR(20),"
+                "  monto_promesa_pago FLOAT DEFAULT 0.0,"
+                "  gps_latitud FLOAT,"
+                "  gps_longitud FLOAT,"
+                "  gestor_uid VARCHAR(100),"
+                "  gestor_nombre VARCHAR(200),"
+                "  fecha_registro_local DATETIME,"
+                "  FOREIGN KEY(cliente_id) REFERENCES clientes(id) ON DELETE SET NULL"
+                ")"
+            ))
+            conn.execute(text_mod(
+                "INSERT INTO historial_visita_v20 ("
+                "  id, cliente_id, campana_id, codigo_cliente, event_id,"
+                "  fecha_evento, estado_gestion, nota_gestor,"
+                "  nivel_1, nivel_2, nivel_3, nivel_4, canal_gestion,"
+                "  fecha_promesa_pago, monto_promesa_pago,"
+                "  gps_latitud, gps_longitud, gestor_uid, gestor_nombre,"
+                "  fecha_registro_local"
+                ") SELECT "
+                "  id, cliente_id, campana_id, codigo_cliente, event_id,"
+                "  fecha_evento, estado_gestion, nota_gestor,"
+                "  nivel_1, nivel_2, nivel_3, nivel_4, canal_gestion,"
+                "  fecha_promesa_pago, monto_promesa_pago,"
+                "  gps_latitud, gps_longitud, gestor_uid, gestor_nombre,"
+                "  fecha_registro_local"
+                " FROM historial_visita"
+            ))
+            conn.execute(text_mod("DROP TABLE historial_visita"))
+            conn.execute(text_mod(
+                "ALTER TABLE historial_visita_v20 RENAME TO historial_visita"
+            ))
+            conn.execute(text_mod(
+                "CREATE INDEX IF NOT EXISTS ix_historial_visita_cliente "
+                "ON historial_visita (cliente_id)"
+            ))
+            conn.execute(text_mod(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ix_historial_visita_event "
+                "ON historial_visita (event_id)"
+            ))
+            conn.execute(text_mod(
+                "CREATE INDEX IF NOT EXISTS ix_historial_visita_campana_id "
+                "ON historial_visita (campana_id)"
+            ))
+            conn.execute(text_mod(
+                "CREATE INDEX IF NOT EXISTS ix_historial_visita_codigo_cliente "
+                "ON historial_visita (codigo_cliente)"
+            ))
+        finally:
+            conn.execute(text_mod("PRAGMA foreign_keys=ON"))
+        session.commit()
 
     def _migrate_v19(self, session: Session) -> None:
         """Etiquetas de seguimiento + historial de visitas."""

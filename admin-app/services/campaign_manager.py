@@ -4019,12 +4019,24 @@ class CampaignManager:
         return campaigns[0]["id"]
 
     @staticmethod
-    def _purge_campaign_records(session: Session, campana_id: str | None = None) -> None:
+    def _purge_campaign_records(
+        session: Session,
+        campana_id: str | None = None,
+        *,
+        keep_history: bool = True,
+    ) -> None:
         """
         Remove campaign-related rows in FK-safe order.
 
         SQLite has PRAGMA foreign_keys=ON; bulk ``DELETE FROM campanas`` fails if
         ``campana_banco_meta`` (and other dependents) still reference the row.
+
+        keep_history=True (default):
+          - Unlink ``historial_visita`` (cliente_id → NULL) so visit results survive.
+          - Keep ``historial_contacto`` (new addresses/phones).
+          - Still delete cartas, tramos, clientes, campana_banco_meta, zonas, repartos.
+        keep_history=False:
+          - Also delete ``historial_visita`` and ``historial_contacto`` (nuclear reset).
         """
         def _scoped(query, model):
             if campana_id is None:
@@ -4037,11 +4049,26 @@ class CampaignManager:
         _scoped(session.query(HistorialTramo), HistorialTramo).delete(
             synchronize_session=False
         )
+
+        if keep_history:
+            # Detach visits from clients before CASCADE-safe delete.
+            hv_q = session.query(HistorialVisita)
+            if campana_id is not None:
+                hv_q = hv_q.filter(HistorialVisita.campana_id == campana_id)
+            hv_q.update(
+                {HistorialVisita.cliente_id: None},
+                synchronize_session=False,
+            )
+        else:
+            _scoped(session.query(HistorialVisita), HistorialVisita).delete(
+                synchronize_session=False
+            )
+            _scoped(session.query(HistorialContacto), HistorialContacto).delete(
+                synchronize_session=False
+            )
+
         _scoped(session.query(Cliente), Cliente).delete(synchronize_session=False)
         _scoped(session.query(CampanaBancoMeta), CampanaBancoMeta).delete(
-            synchronize_session=False
-        )
-        _scoped(session.query(HistorialContacto), HistorialContacto).delete(
             synchronize_session=False
         )
         _scoped(session.query(HistorialZona), HistorialZona).delete(
@@ -4052,7 +4079,7 @@ class CampaignManager:
         )
 
     def delete_campaign_local(self, campana_id: str) -> Dict[str, Any]:
-        """Delete one stored campaign and its related local audit rows."""
+        """Delete one stored campaign; keep visit/contact history by default."""
         with self.db.session() as session:
             campana = session.get(Campana, campana_id)
             if campana is None:
@@ -4063,7 +4090,7 @@ class CampaignManager:
                 .filter(Cliente.campana_id == campana_id)
                 .count()
             )
-            self._purge_campaign_records(session, campana_id)
+            self._purge_campaign_records(session, campana_id, keep_history=True)
             session.delete(campana)
             session.commit()
 
@@ -4071,13 +4098,58 @@ class CampaignManager:
             "delete_campaign",
             n_clients,
             "ok",
-            f"campaign={campana_id}",
+            f"campaign={campana_id}; history_kept=1",
         )
         logger.info("Deleted local campaign %s (%d clients)", campana_id, n_clients)
         return {
             "campaign_id": campana_id,
             "clients_deleted": n_clients,
         }
+
+    def purge_inactive_campaigns(self) -> Dict[str, Any]:
+        """
+        Delete all non-active campaigns from SQLite, keeping visit/contact history.
+
+        Used on app startup and when replacing a campaign with a new Excel cycle.
+        Never touches the active campaign or ContactoPersona (DNI agenda).
+        """
+        result: Dict[str, Any] = {
+            "deleted_campaign_ids": [],
+            "deleted_campaigns": 0,
+            "deleted_clients": 0,
+        }
+        with self.db.session() as session:
+            candidates = (
+                session.query(Campana)
+                .filter(Campana.estado != EstadoCampana.ACTIVA.value)
+                .all()
+            )
+            for camp in candidates:
+                n_clients = (
+                    session.query(Cliente)
+                    .filter(Cliente.campana_id == camp.id)
+                    .count()
+                )
+                result["deleted_clients"] += n_clients
+                result["deleted_campaign_ids"].append(camp.id)
+                self._purge_campaign_records(session, camp.id, keep_history=True)
+                session.delete(camp)
+            session.commit()
+            result["deleted_campaigns"] = len(result["deleted_campaign_ids"])
+
+        if result["deleted_campaigns"]:
+            self._record_sync(
+                "purge_inactive",
+                result["deleted_clients"],
+                "ok",
+                f"campaigns={result['deleted_campaigns']}; history_kept=1",
+            )
+            logger.info(
+                "Purged %d inactive campaign(s), %d clients (history kept)",
+                result["deleted_campaigns"],
+                result["deleted_clients"],
+            )
+        return result
 
     def delete_all_campaign_data(
         self,
@@ -4137,7 +4209,7 @@ class CampaignManager:
             n_clients = session.query(Cliente).count()
             n_campaigns = session.query(Campana).count()
 
-            self._purge_campaign_records(session)
+            self._purge_campaign_records(session, keep_history=False)
             session.query(Campana).delete(synchronize_session=False)
             session.commit()
 
@@ -4174,6 +4246,7 @@ class CampaignManager:
     ) -> Dict[str, Any]:
         """
         Delete ALL local campaign-related data without touching Firebase.
+        Nuclear reset: also removes visit/contact history.
         """
         result: Dict[str, Any] = {
             "local_campaigns_deleted": 0,
@@ -4188,7 +4261,7 @@ class CampaignManager:
         with self.db.session() as session:
             n_clients = session.query(Cliente).count()
             n_campaigns = session.query(Campana).count()
-            self._purge_campaign_records(session)
+            self._purge_campaign_records(session, keep_history=False)
             session.query(Campana).delete(synchronize_session=False)
             session.commit()
             result["local_campaigns_deleted"] = n_campaigns
@@ -4257,7 +4330,7 @@ class CampaignManager:
 
                 result["deleted_clients_estimate"] += camp.total_clientes or 0
                 result["deleted_campaign_ids"].append(camp.id)
-                self._purge_campaign_records(session, camp.id)
+                self._purge_campaign_records(session, camp.id, keep_history=True)
                 session.delete(camp)
 
             session.commit()

@@ -119,6 +119,18 @@ class App(ctk.CTk):
             db_service.initialize()
             logger.info("Database initialized successfully")
             self.active_campaign = self.campaign_mgr.get_active_campaign()
+            # Purge closed/paused campaigns; keep visit/contact history.
+            try:
+                purge_res = self.campaign_mgr.purge_inactive_campaigns()
+                if purge_res.get("deleted_campaigns"):
+                    logger.info(
+                        "Startup purge: %d inactive campaign(s), %d clients "
+                        "(visit/contact history kept)",
+                        purge_res["deleted_campaigns"],
+                        purge_res.get("deleted_clients", 0),
+                    )
+            except Exception as e:
+                logger.warning("Could not purge inactive campaigns on startup: %s", e)
             # Restore parsed_data from SQLite so Campaign page shows data on startup
             if self.active_campaign:
                 try:
@@ -540,12 +552,35 @@ class App(ctk.CTk):
             if not messagebox.askyesno(
                 "Campaña Existente",
                 f"Ya existe una campaña activa: {self.active_campaign.nombre}\n\n"
-                "¿Desea cerrarla y crear una nueva con este archivo?"):
+                "Se eliminarán los datos bancarios de esa campaña "
+                "(clientes, saldos, secciones).\n"
+                "Se conservará el historial de visitas/llamadas y "
+                "las nuevas direcciones/teléfonos reportados.\n\n"
+                "¿Desea continuar y crear una nueva con este archivo?"):
                 return
+            old_id = self.active_campaign.id
             try:
-                self.campaign_mgr.close_campaign(self.active_campaign.id)
+                # Pull latest field gestiones before purge so nothing is lost.
+                if self.firebase_connected:
+                    try:
+                        visit_data = self.firebase.pull_visit_data("cartera_activa")
+                        self.campaign_mgr.sync_visits_from_firebase(
+                            campana_id=old_id,
+                            firebase_data=visit_data,
+                        )
+                    except Exception as sync_exc:
+                        logger.warning(
+                            "Pre-replace visit sync failed (continuing purge): %s",
+                            sync_exc,
+                        )
+                self.campaign_mgr.delete_campaign_local(old_id)
+                self.active_campaign = None
+                self.parsed_data = None
             except Exception as e:
-                messagebox.showerror("Error", f"No se pudo cerrar la campaña:\n{e}")
+                messagebox.showerror(
+                    "Error",
+                    f"No se pudo eliminar la campaña anterior:\n{e}",
+                )
                 return
 
         self.set_status("Leyendo Excel y creando campaña…", 0.2)

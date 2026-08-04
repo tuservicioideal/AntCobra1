@@ -1313,21 +1313,42 @@ class App(ctk.CTk):
             return
 
         self.set_status(result.message, 1)
-        launch = messagebox.askyesno(
+        if not result.exe_path:
+            update_service.open_folder(result.folder or result.zip_path)
+            return
+
+        target, used_fallback = update_service.resolve_install_target()
+        extra = ""
+        if used_fallback:
+            extra = (
+                "\n\nNo se puede escribir en la carpeta actual; "
+                "se instalará en LocalAppData\\AntCobranzas."
+            )
+        apply_now = messagebox.askyesno(
             "Descarga completa",
             f"{result.message}\n\n"
-            f"Archivo: {result.exe_path or result.zip_path}\n\n"
-            "¿Abrir el instalador ahora?\n"
-            "(Cierra esta aplicación antes de instalar.)",
+            f"Versión: {version}\n"
+            f"Se reemplazará la app en:\n{target}"
+            f"{extra}\n\n"
+            "¿Aplicar la actualización ahora?\n"
+            "(Esta ventana se cerrará y la app se abrirá de nuevo.)",
         )
-        if launch and result.exe_path:
-            try:
-                update_service.launch_installer(result.exe_path)
-            except Exception as e:
-                messagebox.showerror("Actualizaciones", f"No se pudo abrir el instalador:\n{e}")
-                update_service.open_folder(result.folder or result.exe_path)
-        else:
-            update_service.open_folder(result.folder or result.zip_path)
+        if not apply_now:
+            update_service.open_folder(result.folder or result.exe_path)
+            return
+        try:
+            applied = update_service.apply_update_inplace(result.exe_path, relaunch=True)
+        except Exception as e:
+            messagebox.showerror("Actualizaciones", f"No se pudo aplicar la actualización:\n{e}")
+            update_service.open_folder(result.folder or result.exe_path)
+            return
+        if not applied.success:
+            messagebox.showerror("Actualizaciones", applied.message)
+            update_service.open_folder(result.folder or result.exe_path)
+            return
+        messagebox.showinfo("Actualizaciones", applied.message)
+        if applied.will_relaunch:
+            self.destroy()
 
     def _invalidate_pages(self):
         """Clear cached page instances so they re-render with fresh data."""
@@ -1542,20 +1563,41 @@ class LoginWindow(ctk.CTk):
             messagebox.showerror("Actualizaciones", result.message)
             return
 
-        launch = messagebox.askyesno(
+        if not result.exe_path:
+            update_service.open_folder(result.folder or result.zip_path)
+            return
+
+        target, used_fallback = update_service.resolve_install_target()
+        extra = ""
+        if used_fallback:
+            extra = (
+                "\n\nNo se puede escribir en la carpeta actual; "
+                "se instalará en LocalAppData\\AntCobranzas."
+            )
+        apply_now = messagebox.askyesno(
             "Descarga completa",
             f"{result.message}\n\n"
-            f"Archivo: {result.exe_path or result.zip_path}\n\n"
-            "¿Abrir el instalador ahora?",
+            f"Se reemplazará la app en:\n{target}"
+            f"{extra}\n\n"
+            "¿Aplicar la actualización ahora?\n"
+            "(Esta ventana se cerrará y la app se abrirá de nuevo.)",
         )
-        if launch and result.exe_path:
-            try:
-                update_service.launch_installer(result.exe_path)
-            except Exception as e:
-                messagebox.showerror("Actualizaciones", f"No se pudo abrir el instalador:\n{e}")
-                update_service.open_folder(result.folder or result.exe_path)
-        else:
-            update_service.open_folder(result.folder or result.zip_path)
+        if not apply_now:
+            update_service.open_folder(result.folder or result.exe_path)
+            return
+        try:
+            applied = update_service.apply_update_inplace(result.exe_path, relaunch=True)
+        except Exception as e:
+            messagebox.showerror("Actualizaciones", f"No se pudo aplicar la actualización:\n{e}")
+            update_service.open_folder(result.folder or result.exe_path)
+            return
+        if not applied.success:
+            messagebox.showerror("Actualizaciones", applied.message)
+            update_service.open_folder(result.folder or result.exe_path)
+            return
+        messagebox.showinfo("Actualizaciones", applied.message)
+        if applied.will_relaunch:
+            self.destroy()
 
 
 def _show_login():

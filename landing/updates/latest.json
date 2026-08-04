@@ -1,10 +1,10 @@
 {
-  "version": "1.0.26",
-  "filename": "Cobranzas-Setup-1.0.26.exe",
-  "url": "https://clase-001.web.app/updates/Cobranzas-Setup-1.0.26.zip",
-  "sha256": "d058a76046495028bd0b75eaef7bc589c816922a1cc79ed9cdca2b8a5cea7ad3",
-  "notes": "Quitar territorio por region, zona o seccion en Equipo. Arbol jerarquico al editar gestores.",
+  "version": "1.0.27",
+  "filename": "Cobranzas-Setup-1.0.27.exe",
+  "url": "https://clase-001.web.app/updates/Cobranzas-Setup-1.0.27.zip",
+  "sha256": "f19aacb43335a88ac20c13383c60bda9932c57240349c4ac1eee348ae47f9040",
+  "notes": "Fix auto-update in-place (sin borrar datos) y BD estable en AppData. Quitar territorio por region/zona/seccion sigue en Equipo.",
   "min_version": "1.0.25",
-  "published_at": "2026-08-03T17:19:46Z",
-  "package": "Cobranzas-Setup-1.0.26.zip"
+  "published_at": "2026-08-04T16:53:17Z",
+  "package": "Cobranzas-Setup-1.0.27.zip"
 }

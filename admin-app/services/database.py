@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 import enum
 import shutil
-import tempfile
 import sys
 from datetime import datetime, date, timedelta
 from typing import Any, Optional, List
@@ -840,28 +839,23 @@ CURRENT_SCHEMA_VERSION = 19
 DB_FILENAME = "antcobranzas.db"
 
 
-def _is_writable_dir(path: str) -> bool:
-    """Return True if the directory is writable by creating a temp file."""
-    try:
-        os.makedirs(path, exist_ok=True)
-        with tempfile.NamedTemporaryFile(dir=path, delete=True):
-            pass
-        return True
-    except Exception:
-        return False
-
-
 def _project_db_path() -> str:
     base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base, "data", DB_FILENAME)
 
 
-def _fallback_user_db_path() -> str:
-    # Keep persistence even when executable directory is read-only.
+def _user_db_path() -> str:
+    """Stable per-user SQLite path (AppData). Independent of EXE folder."""
     appdata = os.environ.get("APPDATA")
     if appdata:
         return os.path.join(appdata, "AntCobranzas", "data", DB_FILENAME)
     return os.path.join(os.path.expanduser("~"), ".antcobranzas", DB_FILENAME)
+
+
+def _exe_adjacent_db_path() -> str | None:
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.dirname(sys.executable), DB_FILENAME)
+    return None
 
 
 def _resolve_default_db_path() -> str:
@@ -870,41 +864,48 @@ def _resolve_default_db_path() -> str:
 
     Priority:
     1) ANTCOBRANZAS_DB_PATH env var (explicit override).
-    2) Next to executable when running frozen (portable mode).
-    3) AppData fallback if executable directory is not writable.
-    4) Project data folder when running from source.
+    2) %APPDATA%\\AntCobranzas\\data when frozen (stable across updates).
+    3) Project data folder when running from source.
     """
     env_path = os.environ.get("ANTCOBRANZAS_DB_PATH")
     if env_path:
         return os.path.abspath(env_path)
 
     if getattr(sys, "frozen", False):
-        exe_dir = os.path.dirname(sys.executable)
-        if _is_writable_dir(exe_dir):
-            return os.path.join(exe_dir, DB_FILENAME)
-        return _fallback_user_db_path()
+        return _user_db_path()
 
     return _project_db_path()
 
 
 def _migrate_legacy_db_if_needed(target_db_path: str) -> None:
     """
-    One-time migration from historical project path to persistent target path.
+    One-time migration into the persistent target path.
     Only runs when target does not exist yet.
+
+    Prefers the portable DB next to the EXE (older installs), then the
+    historical project data folder.
     """
     if os.path.exists(target_db_path):
         return
 
-    legacy_path = _project_db_path()
-    if not os.path.exists(legacy_path):
-        return
+    candidates: list[str] = []
+    exe_db = _exe_adjacent_db_path()
+    if exe_db:
+        candidates.append(exe_db)
+    candidates.append(_project_db_path())
 
-    os.makedirs(os.path.dirname(target_db_path), exist_ok=True)
-    try:
-        shutil.copy2(legacy_path, target_db_path)
-    except Exception:
-        # If copy fails we simply continue and create a fresh DB.
-        pass
+    for legacy_path in candidates:
+        if not legacy_path or os.path.abspath(legacy_path) == os.path.abspath(target_db_path):
+            continue
+        if not os.path.exists(legacy_path):
+            continue
+        os.makedirs(os.path.dirname(target_db_path), exist_ok=True)
+        try:
+            shutil.copy2(legacy_path, target_db_path)
+            return
+        except Exception:
+            # Try next candidate; if all fail we create a fresh DB later.
+            continue
 
 
 _DEFAULT_DB_PATH = _resolve_default_db_path()

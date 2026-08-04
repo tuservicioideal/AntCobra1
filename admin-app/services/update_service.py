@@ -3,6 +3,9 @@ Desktop app update checker / downloader.
 
 Reads the public Hosting manifest at UPDATE_MANIFEST_URL and downloads
 the published ZIP when a newer version is available.
+
+When running as a frozen EXE, apply_update_inplace replaces the running
+binary (via a helper .bat) instead of launching a second copy from Downloads.
 """
 
 from __future__ import annotations
@@ -10,6 +13,8 @@ from __future__ import annotations
 import hashlib
 import os
 import subprocess
+import sys
+import tempfile
 import zipfile
 from dataclasses import dataclass
 from typing import Callable
@@ -46,6 +51,15 @@ class DownloadResult:
     folder: str = ""
 
 
+@dataclass
+class ApplyResult:
+    success: bool
+    message: str
+    target_exe: str = ""
+    used_fallback: bool = False
+    will_relaunch: bool = False
+
+
 def _version_tuple(version: str) -> tuple[int, ...]:
     parts: list[int] = []
     for chunk in (version or "0").strip().lstrip("vV").split("."):
@@ -56,6 +70,10 @@ def _version_tuple(version: str) -> tuple[int, ...]:
 
 def current_version() -> str:
     return APP_VERSION
+
+
+def is_frozen() -> bool:
+    return bool(getattr(sys, "frozen", False))
 
 
 def fetch_latest(timeout: int = 20) -> UpdateInfo:
@@ -83,6 +101,42 @@ def default_download_dir() -> str:
     return target
 
 
+def _local_install_dir() -> str:
+    local = os.environ.get("LOCALAPPDATA") or os.path.expanduser("~")
+    path = os.path.join(local, "AntCobranzas")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _is_writable_dir(path: str) -> bool:
+    try:
+        os.makedirs(path, exist_ok=True)
+        with tempfile.NamedTemporaryFile(dir=path, delete=True):
+            pass
+        return True
+    except Exception:
+        return False
+
+
+def resolve_install_target() -> tuple[str, bool]:
+    """
+    Return (target_exe_path, used_fallback).
+
+    Prefer replacing the currently running frozen EXE. If that directory is
+    not writable, fall back to %LOCALAPPDATA%\\AntCobranzas\\AntCobranzas.exe.
+    """
+    if is_frozen():
+        current = os.path.abspath(sys.executable)
+        exe_dir = os.path.dirname(current)
+        if _is_writable_dir(exe_dir):
+            return current, False
+        fallback = os.path.join(_local_install_dir(), "AntCobranzas.exe")
+        return fallback, True
+
+    # Dev / non-frozen: stage under LocalAppData so the flow stays testable.
+    return os.path.join(_local_install_dir(), "AntCobranzas.exe"), True
+
+
 def _sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -99,7 +153,7 @@ def download_update(
     dest_dir: str | None = None,
     progress: ProgressCb | None = None,
 ) -> DownloadResult:
-    """Download ZIP, verify sha256 when present, extract installer EXE."""
+    """Download ZIP, verify sha256 when present, extract update EXE."""
     if not info.url:
         return DownloadResult(success=False, message="El manifiesto no incluye URL de descarga.")
 
@@ -156,7 +210,7 @@ def download_update(
             if not names:
                 return DownloadResult(
                     success=False,
-                    message="El paquete no contiene un instalador .exe.",
+                    message="El paquete no contiene un ejecutable .exe.",
                     zip_path=zip_path,
                     folder=folder,
                 )
@@ -183,7 +237,7 @@ def download_update(
     except Exception as e:
         return DownloadResult(
             success=False,
-            message=f"No se pudo extraer el instalador: {e}",
+            message=f"No se pudo extraer el ejecutable: {e}",
             zip_path=zip_path,
             folder=folder,
         )
@@ -209,5 +263,163 @@ def open_folder(path: str) -> None:
 
 
 def launch_installer(exe_path: str) -> None:
+    """Legacy: open the downloaded EXE in place (avoid for frozen installs)."""
     if exe_path and os.path.isfile(exe_path):
         os.startfile(exe_path)  # type: ignore[attr-defined]
+
+
+def _write_replace_bat(
+    *,
+    source_exe: str,
+    target_exe: str,
+    pid: int,
+    relaunch: bool,
+) -> str:
+    """
+    Write a helper .bat that waits for this process to exit, replaces the EXE,
+    optionally relaunches, then deletes itself.
+    """
+    bat_dir = os.path.dirname(target_exe) or tempfile.gettempdir()
+    os.makedirs(bat_dir, exist_ok=True)
+    bat_path = os.path.join(bat_dir, "_antcobranzas_update.bat")
+
+    # Escape for cmd: paths with spaces must be quoted; percent doubled.
+    src = source_exe.replace("%", "%%")
+    dst = target_exe.replace("%", "%%")
+    old = (target_exe + ".old").replace("%", "%%")
+    bat_self = bat_path.replace("%", "%%")
+
+    relaunch_line = f'start "" "{dst}"' if relaunch else "rem no relaunch"
+
+    content = f"""@echo off
+setlocal
+set PID={pid}
+:wait
+tasklist /FI "PID eq %PID%" 2>NUL | find "%PID%" >NUL
+if not errorlevel 1 (
+  timeout /t 1 /nobreak >NUL
+  goto wait
+)
+if exist "{old}" del /f /q "{old}" >NUL 2>&1
+if exist "{dst}" move /y "{dst}" "{old}" >NUL 2>&1
+copy /y "{src}" "{dst}" >NUL
+if errorlevel 1 (
+  echo ERROR: no se pudo copiar la actualizacion.
+  pause
+  exit /b 1
+)
+del /f /q "{old}" >NUL 2>&1
+{relaunch_line}
+del /f /q "{bat_self}" >NUL 2>&1
+"""
+    with open(bat_path, "w", encoding="utf-8", newline="\r\n") as fh:
+        fh.write(content)
+    return bat_path
+
+
+def apply_update_inplace(
+    source_exe: str,
+    *,
+    relaunch: bool = True,
+) -> ApplyResult:
+    """
+    Replace the installed EXE with ``source_exe`` and optionally relaunch.
+
+    When frozen, schedules a .bat that runs after this process exits (Windows
+    locks the running executable). Caller should quit the app after success.
+    """
+    if not source_exe or not os.path.isfile(source_exe):
+        return ApplyResult(success=False, message="No se encontró el ejecutable descargado.")
+
+    target_exe, used_fallback = resolve_install_target()
+    target_dir = os.path.dirname(target_exe)
+    if not _is_writable_dir(target_dir):
+        return ApplyResult(
+            success=False,
+            message=(
+                f"No hay permiso de escritura en:\n{target_dir}\n\n"
+                "Abra la carpeta de descarga y copie el EXE manualmente."
+            ),
+            target_exe=target_exe,
+            used_fallback=used_fallback,
+        )
+
+    # Same path: nothing to replace (already running the downloaded file).
+    if os.path.abspath(source_exe) == os.path.abspath(target_exe):
+        return ApplyResult(
+            success=True,
+            message="La actualización ya está en la ubicación de instalación.",
+            target_exe=target_exe,
+            used_fallback=used_fallback,
+            will_relaunch=False,
+        )
+
+    if is_frozen():
+        try:
+            bat_path = _write_replace_bat(
+                source_exe=os.path.abspath(source_exe),
+                target_exe=os.path.abspath(target_exe),
+                pid=os.getpid(),
+                relaunch=relaunch,
+            )
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP so bat outlives us.
+            creationflags = 0x00000008 | 0x00000200
+            subprocess.Popen(
+                ["cmd.exe", "/c", bat_path],
+                close_fds=True,
+                creationflags=creationflags,
+                cwd=target_dir,
+            )
+        except Exception as e:
+            return ApplyResult(
+                success=False,
+                message=f"No se pudo programar el reemplazo:\n{e}",
+                target_exe=target_exe,
+                used_fallback=used_fallback,
+            )
+
+        msg = (
+            f"Se reemplazará la aplicación en:\n{target_exe}\n\n"
+            "La app se cerrará y se abrirá de nuevo con la versión nueva."
+        )
+        if used_fallback:
+            msg += (
+                "\n\nNota: no se pudo escribir en la carpeta actual; "
+                "la app quedará en LocalAppData\\AntCobranzas. "
+                "Use ese acceso directo de ahora en adelante."
+            )
+        return ApplyResult(
+            success=True,
+            message=msg,
+            target_exe=target_exe,
+            used_fallback=used_fallback,
+            will_relaunch=relaunch,
+        )
+
+    # Non-frozen: copy immediately (no running EXE lock on target).
+    try:
+        if os.path.exists(target_exe):
+            try:
+                os.replace(target_exe, target_exe + ".old")
+            except OSError:
+                pass
+        import shutil
+
+        shutil.copy2(source_exe, target_exe)
+        if relaunch and os.path.isfile(target_exe):
+            os.startfile(target_exe)  # type: ignore[attr-defined]
+    except Exception as e:
+        return ApplyResult(
+            success=False,
+            message=f"No se pudo copiar la actualización:\n{e}",
+            target_exe=target_exe,
+            used_fallback=used_fallback,
+        )
+
+    return ApplyResult(
+        success=True,
+        message=f"Actualización aplicada en:\n{target_exe}",
+        target_exe=target_exe,
+        used_fallback=used_fallback,
+        will_relaunch=relaunch,
+    )

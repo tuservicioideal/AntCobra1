@@ -1349,42 +1349,54 @@ class TeamPage:
     def _save_assignments(self, save_btn):
         save_btn.configure(state="disabled", text="Guardando…")
 
-        new_assignments = {}
+        # Only sections visible in Distribución (current Excel) are in scope.
+        excel_keys = set(self._section_vars.keys())
+        uid_to_keys: dict[str, list[str]] = {}
         for sec_key, var in self._section_vars.items():
             uid = self._uid_map.get(var.get())
             if uid:
-                new_assignments[sec_key] = uid
-
-        uid_to_keys: dict[str, list[str]] = {}
-        for sec_key, uid in new_assignments.items():
-            uid_to_keys.setdefault(uid, []).append(sec_key)
-
-        def _parse_key(key: str):
-            parts = key.split("_", 2)
-            return (parts[0], parts[1], parts[2]) if len(parts) == 3 else ("", "", key)
+                uid_to_keys.setdefault(uid, []).append(sec_key)
 
         def work():
             updated = 0
+            # Merge scoped to Excel: keep sections outside excel_keys; never wipe
+            # call gestors or users whose territory is entirely outside this Excel.
             for g in self._gestores:
+                if g.get("canal") == "call":
+                    continue
                 uid = g.get("uid") or g.get("id", "")
-                if uid not in uid_to_keys:
-                    old = g.get("secciones") or g.get("seccion", "")
-                    if old:
-                        try:
-                            self.app.firebase.update_user(uid, {
-                                "seccion": "", "secciones": [],
-                                "region": "", "zona": ""})
-                            updated += 1
-                        except Exception:
-                            pass
+                if not uid:
+                    continue
 
-            for uid, keys in uid_to_keys.items():
-                keys_sorted = sorted(keys)
-                r, z, s = _parse_key(keys_sorted[0])
+                current = g.get("secciones") or []
+                if not isinstance(current, list):
+                    legacy = g.get("seccion", "")
+                    current = [legacy] if legacy else []
+
+                kept = [sk for sk in current if sk not in excel_keys]
+                assigned = uid_to_keys.get(uid, [])
+                keys_sorted = sorted(set(kept) | set(assigned))
+
+                if keys_sorted == sorted(set(current)):
+                    continue
+
+                if keys_sorted:
+                    r, z, s = legacy_fields_from_secciones(keys_sorted)
+                    payload = {
+                        "secciones": keys_sorted,
+                        "seccion": s,
+                        "region": r,
+                        "zona": z,
+                    }
+                else:
+                    payload = {
+                        "secciones": [],
+                        "seccion": "",
+                        "region": "",
+                        "zona": "",
+                    }
                 try:
-                    self.app.firebase.update_user(uid, {
-                        "secciones": keys_sorted, "seccion": s,
-                        "region": r, "zona": z})
+                    self.app.firebase.update_user(uid, payload)
                     updated += 1
                 except Exception:
                     pass

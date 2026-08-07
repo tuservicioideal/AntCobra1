@@ -1,10 +1,10 @@
 {
-  "version": "1.0.27",
-  "filename": "Cobranzas-Setup-1.0.27.exe",
-  "url": "https://clase-001.web.app/updates/Cobranzas-Setup-1.0.27.zip",
-  "sha256": "f19aacb43335a88ac20c13383c60bda9932c57240349c4ac1eee348ae47f9040",
-  "notes": "Fix auto-update in-place (sin borrar datos) y BD estable en AppData. Quitar territorio por region/zona/seccion sigue en Equipo.",
+  "version": "1.0.28",
+  "filename": "Cobranzas-Setup-1.0.28.exe",
+  "url": "https://clase-001.web.app/updates/Cobranzas-Setup-1.0.28.zip",
+  "sha256": "0e698bfef081152efe35a50034bd4346b21e63277e9bf898a6157953a42d0fb8",
+  "notes": "Rompe el bucle de versión antigua: instala en LocalAppData, actualiza el acceso directo del Escritorio y avisa de actualizaciones al abrir.",
   "min_version": "1.0.25",
-  "published_at": "2026-08-04T16:53:17Z",
-  "package": "Cobranzas-Setup-1.0.27.zip"
+  "published_at": "2026-08-07T20:35:00Z",
+  "package": "Cobranzas-Setup-1.0.28.zip"
 }

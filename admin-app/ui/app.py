@@ -1356,8 +1356,8 @@ class App(ctk.CTk):
         extra = ""
         if used_fallback:
             extra = (
-                "\n\nNo se puede escribir en la carpeta actual; "
-                "se instalará en LocalAppData\\AntCobranzas."
+                "\n\nSe instalará en LocalAppData\\AntCobranzas "
+                "y se actualizará el acceso directo del Escritorio."
             )
         apply_now = messagebox.askyesno(
             "Descarga completa",
@@ -1417,6 +1417,44 @@ class LoginWindow(ctk.CTk):
         x = (self.winfo_screenwidth() // 2) - (210)
         y = (self.winfo_screenheight() // 2) - (300)
         self.geometry(f"+{x}+{y}")
+
+        # Staging Setup → LocalAppData, then optional update prompt.
+        self.after(80, self._maybe_migrate_staging)
+
+    def _maybe_migrate_staging(self):
+        """Move Downloads/Setup EXE to the canonical install before login."""
+        try:
+            result = update_service.ensure_canonical_install()
+        except Exception as e:
+            messagebox.showwarning(
+                "Instalación",
+                f"No se pudo completar la instalación estable:\n{e}",
+            )
+            self.after(400, self._check_updates_on_startup)
+            return
+
+        if result.migrated:
+            messagebox.showinfo("Instalación", result.message)
+            if result.will_relaunch:
+                self.destroy()
+                return
+            # Migrated but did not relaunch — continue with this process.
+        elif result.message:
+            messagebox.showwarning("Instalación", result.message)
+
+        self.after(400, self._check_updates_on_startup)
+
+    def _check_updates_on_startup(self):
+        """Silent background check; only prompt when a newer build exists."""
+        def work():
+            try:
+                info = update_service.fetch_latest()
+                if info.version and info.is_newer:
+                    self.after(0, lambda: self._on_update_info(info, from_startup=True))
+            except Exception:
+                pass
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _init_firebase(self):
         from config import service_account_key_path
@@ -1558,17 +1596,19 @@ class LoginWindow(ctk.CTk):
         self._btn_update.configure(state="normal", text="⬇ Actualizar app")
         self._error_lbl.configure(text=f"No se pudo buscar actualización: {msg}")
 
-    def _on_update_info(self, info):
+    def _on_update_info(self, info, from_startup: bool = False):
         self._btn_update.configure(state="normal", text="⬇ Actualizar app")
         if not info.version:
-            self._error_lbl.configure(text="Manifiesto de versión inválido.")
+            if not from_startup:
+                self._error_lbl.configure(text="Manifiesto de versión inválido.")
             return
         if not info.is_newer:
-            messagebox.showinfo(
-                "Actualizaciones",
-                f"Ya tienes la última versión ({APP_VERSION}).\n"
-                f"Publicada en servidor: {info.version}",
-            )
+            if not from_startup:
+                messagebox.showinfo(
+                    "Actualizaciones",
+                    f"Ya tienes la última versión ({APP_VERSION}).\n"
+                    f"Publicada en servidor: {info.version}",
+                )
             return
 
         notes = info.notes or "(Sin notas)"
@@ -1606,8 +1646,8 @@ class LoginWindow(ctk.CTk):
         extra = ""
         if used_fallback:
             extra = (
-                "\n\nNo se puede escribir en la carpeta actual; "
-                "se instalará en LocalAppData\\AntCobranzas."
+                "\n\nSe instalará en LocalAppData\\AntCobranzas "
+                "y se actualizará el acceso directo del Escritorio."
             )
         apply_now = messagebox.askyesno(
             "Descarga completa",

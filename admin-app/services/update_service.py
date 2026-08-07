@@ -6,12 +6,16 @@ the published ZIP when a newer version is available.
 
 When running as a frozen EXE, apply_update_inplace replaces the running
 binary (via a helper .bat) instead of launching a second copy from Downloads.
+
+Staging builds (Downloads\\RecaudoLegal\\updates or Cobranzas-Setup-*.exe)
+migrate to the canonical LocalAppData install and refresh the desktop shortcut.
 """
 
 from __future__ import annotations
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,6 +29,8 @@ from config import APP_VERSION, UPDATE_MANIFEST_URL
 
 
 ProgressCb = Callable[[str, float], None]
+
+SHORTCUT_NAME = "Recaudo Legal"
 
 
 @dataclass
@@ -58,6 +64,16 @@ class ApplyResult:
     target_exe: str = ""
     used_fallback: bool = False
     will_relaunch: bool = False
+    shortcut_path: str = ""
+
+
+@dataclass
+class CanonicalInstallResult:
+    migrated: bool
+    message: str
+    target_exe: str = ""
+    will_relaunch: bool = False
+    shortcut_path: str = ""
 
 
 def _version_tuple(version: str) -> tuple[int, ...]:
@@ -108,6 +124,31 @@ def _local_install_dir() -> str:
     return path
 
 
+def canonical_exe_path() -> str:
+    """Stable install path used after leaving Downloads staging."""
+    return os.path.join(_local_install_dir(), "AntCobranzas.exe")
+
+
+def is_staging_exe(path: str | None = None) -> bool:
+    """
+    True when the EXE lives in the update download folder or is a Setup rename.
+
+    Those copies must not become the long-term install target (old shortcuts
+    would keep pointing at an outdated Desktop/USB binary).
+    """
+    raw = path if path is not None else (sys.executable if is_frozen() else "")
+    if not raw:
+        return False
+    abspath = os.path.abspath(raw)
+    name = os.path.basename(abspath).lower()
+    if name.startswith("cobranzas-setup-") and name.endswith(".exe"):
+        return True
+    norm = abspath.replace("/", "\\").lower()
+    return "\\recaudolegal\\updates\\" in norm or norm.rstrip("\\").endswith(
+        "\\recaudolegal\\updates"
+    )
+
+
 def _is_writable_dir(path: str) -> bool:
     try:
         os.makedirs(path, exist_ok=True)
@@ -120,21 +161,172 @@ def _is_writable_dir(path: str) -> bool:
 
 def resolve_install_target() -> tuple[str, bool]:
     """
-    Return (target_exe_path, used_fallback).
+    Return (target_exe_path, used_canonical_or_fallback).
 
-    Prefer replacing the currently running frozen EXE. If that directory is
-    not writable, fall back to %LOCALAPPDATA%\\AntCobranzas\\AntCobranzas.exe.
+    Staging EXEs always install to the canonical LocalAppData path.
+    Otherwise prefer replacing the currently running frozen EXE when writable.
     """
     if is_frozen():
         current = os.path.abspath(sys.executable)
+        if is_staging_exe(current):
+            return canonical_exe_path(), True
         exe_dir = os.path.dirname(current)
         if _is_writable_dir(exe_dir):
             return current, False
-        fallback = os.path.join(_local_install_dir(), "AntCobranzas.exe")
-        return fallback, True
+        return canonical_exe_path(), True
 
     # Dev / non-frozen: stage under LocalAppData so the flow stays testable.
-    return os.path.join(_local_install_dir(), "AntCobranzas.exe"), True
+    return canonical_exe_path(), True
+
+
+def _desktop_dir() -> str:
+    home = os.path.expanduser("~")
+    userprofile = os.environ.get("USERPROFILE") or home
+    candidates = [
+        os.path.join(userprofile, "Desktop"),
+        os.path.join(home, "Desktop"),
+        os.path.join(userprofile, "OneDrive", "Desktop"),
+    ]
+    for candidate in candidates:
+        if os.path.isdir(candidate):
+            return candidate
+    return candidates[0]
+
+
+def create_or_update_desktop_shortcut(
+    target_exe: str,
+    name: str = SHORTCUT_NAME,
+) -> str:
+    """
+    Create or refresh a Desktop .lnk pointing at ``target_exe``.
+
+    Uses WScript.Shell via PowerShell (no extra Python deps). Returns the .lnk path.
+    """
+    if not target_exe:
+        return ""
+    target_exe = os.path.abspath(target_exe)
+    desktop = _desktop_dir()
+    os.makedirs(desktop, exist_ok=True)
+    lnk_path = os.path.join(desktop, f"{name}.lnk")
+    work_dir = os.path.dirname(target_exe)
+
+    def _ps_escape(value: str) -> str:
+        return value.replace("'", "''")
+
+    ps = (
+        "$ws = New-Object -ComObject WScript.Shell; "
+        f"$s = $ws.CreateShortcut('{_ps_escape(lnk_path)}'); "
+        f"$s.TargetPath = '{_ps_escape(target_exe)}'; "
+        f"$s.WorkingDirectory = '{_ps_escape(work_dir)}'; "
+        "$s.Description = 'Recaudo Legal — AntCobranzas'; "
+        f"$s.IconLocation = '{_ps_escape(target_exe)},0'; "
+        "$s.Save()"
+    )
+    try:
+        subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                ps,
+            ],
+            check=False,
+            capture_output=True,
+            timeout=45,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception:
+        return ""
+    return lnk_path if os.path.isfile(lnk_path) else lnk_path
+
+
+def ensure_canonical_install() -> CanonicalInstallResult:
+    """
+    If the frozen EXE is a staging/Setup copy, install it to LocalAppData,
+    refresh the desktop shortcut, relaunch, and signal the UI to quit.
+    """
+    if not is_frozen():
+        return CanonicalInstallResult(migrated=False, message="")
+
+    current = os.path.abspath(sys.executable)
+    if not is_staging_exe(current):
+        return CanonicalInstallResult(migrated=False, message="")
+
+    target = canonical_exe_path()
+    if os.path.abspath(current) == os.path.abspath(target):
+        shortcut = create_or_update_desktop_shortcut(target)
+        return CanonicalInstallResult(
+            migrated=False,
+            message="",
+            target_exe=target,
+            shortcut_path=shortcut,
+        )
+
+    target_dir = os.path.dirname(target)
+    if not _is_writable_dir(target_dir):
+        return CanonicalInstallResult(
+            migrated=False,
+            message=(
+                f"No hay permiso de escritura en:\n{target_dir}\n\n"
+                "Copie el EXE manualmente a esa carpeta o ejecute como usuario "
+                "con permisos."
+            ),
+            target_exe=target,
+        )
+
+    try:
+        if os.path.exists(target):
+            try:
+                os.replace(target, target + ".old")
+            except OSError:
+                pass
+        shutil.copy2(current, target)
+        shortcut = create_or_update_desktop_shortcut(target)
+        try:
+            os.startfile(target)  # type: ignore[attr-defined]
+        except Exception as e:
+            return CanonicalInstallResult(
+                migrated=True,
+                message=(
+                    f"Se instaló en:\n{target}\n\n"
+                    f"No se pudo reabrir automáticamente: {e}\n"
+                    "Ábrala desde el acceso directo del Escritorio."
+                ),
+                target_exe=target,
+                will_relaunch=False,
+                shortcut_path=shortcut,
+            )
+        msg = (
+            f"La app se instaló en una ubicación estable:\n{target}\n\n"
+            "Se creó/actualizó el acceso directo «Recaudo Legal» en el Escritorio.\n"
+            "Use ese acceso directo de ahora en adelante."
+        )
+        return CanonicalInstallResult(
+            migrated=True,
+            message=msg,
+            target_exe=target,
+            will_relaunch=True,
+            shortcut_path=shortcut,
+        )
+    except Exception as e:
+        # Fallback: schedule bat replace after this process exits.
+        applied = apply_update_inplace(current, relaunch=True, refresh_shortcut=True)
+        if applied.success:
+            return CanonicalInstallResult(
+                migrated=True,
+                message=applied.message or str(e),
+                target_exe=applied.target_exe,
+                will_relaunch=applied.will_relaunch,
+                shortcut_path=applied.shortcut_path,
+            )
+        return CanonicalInstallResult(
+            migrated=False,
+            message=f"No se pudo migrar la instalación:\n{e}",
+            target_exe=target,
+        )
 
 
 def _sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
@@ -321,6 +513,7 @@ def apply_update_inplace(
     source_exe: str,
     *,
     relaunch: bool = True,
+    refresh_shortcut: bool = True,
 ) -> ApplyResult:
     """
     Replace the installed EXE with ``source_exe`` and optionally relaunch.
@@ -344,14 +537,19 @@ def apply_update_inplace(
             used_fallback=used_fallback,
         )
 
+    shortcut_path = ""
+
     # Same path: nothing to replace (already running the downloaded file).
     if os.path.abspath(source_exe) == os.path.abspath(target_exe):
+        if refresh_shortcut:
+            shortcut_path = create_or_update_desktop_shortcut(target_exe)
         return ApplyResult(
             success=True,
             message="La actualización ya está en la ubicación de instalación.",
             target_exe=target_exe,
             used_fallback=used_fallback,
             will_relaunch=False,
+            shortcut_path=shortcut_path,
         )
 
     if is_frozen():
@@ -378,15 +576,17 @@ def apply_update_inplace(
                 used_fallback=used_fallback,
             )
 
+        if refresh_shortcut:
+            shortcut_path = create_or_update_desktop_shortcut(target_exe)
+
         msg = (
             f"Se reemplazará la aplicación en:\n{target_exe}\n\n"
             "La app se cerrará y se abrirá de nuevo con la versión nueva."
         )
         if used_fallback:
             msg += (
-                "\n\nNota: no se pudo escribir en la carpeta actual; "
-                "la app quedará en LocalAppData\\AntCobranzas. "
-                "Use ese acceso directo de ahora en adelante."
+                "\n\nSe actualizó el acceso directo «Recaudo Legal» en el Escritorio "
+                "(LocalAppData\\AntCobranzas). Use ese acceso directo de ahora en adelante."
             )
         return ApplyResult(
             success=True,
@@ -394,6 +594,7 @@ def apply_update_inplace(
             target_exe=target_exe,
             used_fallback=used_fallback,
             will_relaunch=relaunch,
+            shortcut_path=shortcut_path,
         )
 
     # Non-frozen: copy immediately (no running EXE lock on target).
@@ -403,9 +604,10 @@ def apply_update_inplace(
                 os.replace(target_exe, target_exe + ".old")
             except OSError:
                 pass
-        import shutil
 
         shutil.copy2(source_exe, target_exe)
+        if refresh_shortcut:
+            shortcut_path = create_or_update_desktop_shortcut(target_exe)
         if relaunch and os.path.isfile(target_exe):
             os.startfile(target_exe)  # type: ignore[attr-defined]
     except Exception as e:
@@ -422,4 +624,5 @@ def apply_update_inplace(
         target_exe=target_exe,
         used_fallback=used_fallback,
         will_relaunch=relaunch,
+        shortcut_path=shortcut_path,
     )

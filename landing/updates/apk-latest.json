@@ -1,9 +1,9 @@
-{
-  "version": "1.0.7",
-  "filename": "app-recaudo-legal-1.0.7.apk",
-  "url": "https://clase-001.web.app/updates/app-recaudo-legal-1.0.7.apk",
-  "sha256": "33d067bd3a8aa8ecba5fa04389000281a49523e1808268ec861745db5f68e371",
-  "notes": "Consultas Telegram (Doxeo): el DNI se envía sin ceros de relleno del banco, el cupo ya no bloquea por consultas viejas y puedes reintentar si falla.",
+﻿{
+  "version": "1.0.8",
+  "filename": "app-recaudo-legal-1.0.8.apk",
+  "url": "https://clase-001.web.app/updates/app-recaudo-legal-1.0.8.apk",
+  "sha256": "286e5fb9b954238bc19de31f10f2f112ebfecef21592bb1238a1bf4b056a81f3",
+  "notes": "Plantillas WhatsApp editables (personales y de empresa) con datos del cliente al abrir el chat. Incluye mejoras de gestion, bitacora y semaforo.",
   "min_version": "1.0.0",
-  "published_at": "2026-09-10T17:20:00Z"
+  "published_at": "2026-09-13T13:10:00Z"
 }

@@ -4,6 +4,17 @@ Monorepo de cobranzas bancarias (ciclo ~60 días, 3 tramos, gestores de campo). 
 
 **Datos:** el DNI (`numero_documento`) se guarda en SQLite y se publica en Firestore para gestores call/campo (`include_sensitive=True` en upload).
 
+## Credenciales E2E (locales)
+
+Archivo **no versionado**: [`.env.e2e.local`](.env.e2e.local) (plantilla: [`e2e/.env.example`](e2e/.env.example)).  
+Instrucciones: [`e2e/README.md`](e2e/README.md). Portal web: https://gestores-clase-001.web.app
+
+```powershell
+cd AntCobra1
+npm install
+npm run test:e2e
+```
+
 ## Apps y puntos de entrada
 
 | App | Stack | Entrada principal |

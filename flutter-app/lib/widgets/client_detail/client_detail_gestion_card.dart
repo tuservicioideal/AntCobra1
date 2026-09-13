@@ -84,15 +84,50 @@ class ClientDetailGestionCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text(
-            'Resultado de la gestión',
-            style: TextStyle(
-              fontWeight: FontWeight.w600,
-              fontSize: 14,
-              color: AppTheme.textPrimary,
-            ),
+          Row(
+            children: [
+              Container(
+                width: 22,
+                height: 22,
+                alignment: Alignment.center,
+                decoration: const BoxDecoration(
+                  color: AppTheme.primary,
+                  shape: BoxShape.circle,
+                ),
+                child: const Text(
+                  '1',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              const Expanded(
+                child: Text(
+                  'Resultado de la gestión',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                    color: AppTheme.textPrimary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'Seleccione canal y niveles, luego registre.',
+            style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
           ),
           const SizedBox(height: 10),
+          if (lockCanalToTel)
+            _callCenterBanner()
+          else if (catalogLoaded && !catalogLoading)
+            _canalToggle(),
+          if (lockCanalToTel || (catalogLoaded && !catalogLoading))
+            const SizedBox(height: 10),
           if (catalogLoading)
             const Center(
               child: Padding(
@@ -114,64 +149,6 @@ class ClientDetailGestionCard extends StatelessWidget {
               ),
             )
           else ...[
-            if (lockCanalToTel)
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
-                decoration: BoxDecoration(
-                  color: AppTheme.primary.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppTheme.primary.withValues(alpha: 0.3)),
-                ),
-                child: const Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(Icons.phone_in_talk, size: 18, color: AppTheme.primary),
-                    SizedBox(width: 8),
-                    Text(
-                      'Gestión telefónica (Call Center)',
-                      style: TextStyle(
-                        fontWeight: FontWeight.w600,
-                        fontSize: 13,
-                        color: AppTheme.primary,
-                      ),
-                    ),
-                  ],
-                ),
-              )
-            else
-              Row(
-                children: nivelCatalog.canales.map((c) {
-                  final isSelected = canal == c;
-                  return Expanded(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 3),
-                      child: ElevatedButton(
-                        onPressed: () => onCanalChanged(c),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor:
-                              isSelected ? AppTheme.primary : AppTheme.divider,
-                          foregroundColor:
-                              isSelected ? Colors.white : AppTheme.textSecondary,
-                          elevation: isSelected ? 1 : 0,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          padding: const EdgeInsets.symmetric(vertical: 10),
-                        ),
-                        child: Text(
-                          c == 'CAM' ? 'Campo' : 'Teléfono',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w600,
-                            fontSize: 13,
-                          ),
-                        ),
-                      ),
-                    ),
-                  );
-                }).toList(),
-              ),
-            const SizedBox(height: 10),
             _nivelDropdown(
               label: 'Nivel 1 — Tipo de contacto',
               value: nivel1,
@@ -241,66 +218,204 @@ class ClientDetailGestionCard extends StatelessWidget {
                 ),
               ),
             ),
-          ],
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              const Expanded(child: Divider()),
+            if (requireGps && !gpsReady)
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 8),
+                padding: const EdgeInsets.only(top: 6),
                 child: Text(
-                  'Estados especiales',
-                  style: TextStyle(
-                    fontSize: 10,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.grey.shade400,
-                    letterSpacing: 0.8,
-                  ),
+                  'Esperando GPS para habilitar el registro…',
+                  textAlign: TextAlign.center,
+                  style:
+                      TextStyle(fontSize: 11, color: Colors.amber.shade800),
                 ),
               ),
-              const Expanded(child: Divider()),
-            ],
-          ),
-          const SizedBox(height: 8),
-          Row(
-            children: [
-              Expanded(
-                child: _specialButton(
-                  label: 'Suplantación',
-                  color: AppTheme.statusSuplantacion,
-                  icon: Icons.warning_amber_outlined,
-                  enabled: gpsReady && !saving,
-                  onTap: () => onSpecialStatus('suplantacion', 'Suplantación'),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _specialButton(
-                  label: 'Pago no registrado',
-                  color: AppTheme.statusPagoNoRegistrado,
-                  icon: Icons.money_off_outlined,
-                  enabled: gpsReady && !saving,
-                  onTap: () =>
-                      onSpecialStatus('pago_no_registrado', 'Pago No Registrado'),
-                ),
-              ),
-            ],
-          ),
-          if (canRequestReturn && onRequestReturn != null) ...[
-            const SizedBox(height: 8),
-            _specialButton(
-              label: 'Zona inaccesible — Devolver',
-              color: const Color(0xFF7C3AED),
-              icon: Icons.undo_outlined,
-              enabled: gpsReady && !saving,
-              onTap: onRequestReturn!,
-            ),
           ],
           if (!_showMontoPanel) ...[
             const SizedBox(height: 10),
             _buildOptionalMontoRow(),
           ],
+          const SizedBox(height: 12),
+          const Divider(height: 1),
+          const SizedBox(height: 12),
+          _buildSpecialStatesSection(),
         ],
+      ),
+    );
+  }
+
+  Widget _callCenterBanner() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 12),
+      decoration: BoxDecoration(
+        color: AppTheme.primary.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.primary.withValues(alpha: 0.3)),
+      ),
+      child: const Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.phone_in_talk, size: 18, color: AppTheme.primary),
+          SizedBox(width: 8),
+          Text(
+            'Gestión telefónica (Call Center)',
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: 13,
+              color: AppTheme.primary,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _canalToggle() {
+    return Row(
+      children: nivelCatalog.canales.map((c) {
+        final isSelected = canal == c;
+        return Expanded(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 3),
+            child: ElevatedButton(
+              onPressed: () => onCanalChanged(c),
+              style: ElevatedButton.styleFrom(
+                backgroundColor:
+                    isSelected ? AppTheme.primary : AppTheme.divider,
+                foregroundColor:
+                    isSelected ? Colors.white : AppTheme.textSecondary,
+                elevation: isSelected ? 1 : 0,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                padding: const EdgeInsets.symmetric(vertical: 10),
+              ),
+              child: Text(
+                c == 'CAM' ? 'Campo' : 'Teléfono',
+                style: const TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+          ),
+        );
+      }).toList(),
+    );
+  }
+
+  Widget _buildSpecialStatesSection() {
+    final enabled = gpsReady && !saving;
+    return Container(
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: Colors.grey.shade50,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.grey.shade200),
+      ),
+      child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Row(
+          children: [
+            Container(
+              width: 22,
+              height: 22,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                shape: BoxShape.circle,
+              ),
+              child: const Text(
+                '2',
+                style: TextStyle(
+                  color: Colors.black87,
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: Text(
+                'Casos al resolutor (opcional)',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: AppTheme.textPrimary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        Text(
+          'Solo si hay un problema. El cliente sigue en tu cartera.',
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: _specialButton(
+                label: 'Suplantación',
+                color: AppTheme.statusSuplantacion,
+                icon: Icons.warning_amber_outlined,
+                enabled: enabled,
+                onTap: () => onSpecialStatus('suplantacion', 'Suplantación'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _specialButton(
+                label: 'Pago no registrado',
+                color: AppTheme.statusPagoNoRegistrado,
+                icon: Icons.money_off_outlined,
+                enabled: enabled,
+                onTap: () =>
+                    onSpecialStatus('pago_no_registrado', 'Pago No Registrado'),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            Expanded(
+              child: _specialButton(
+                label: 'No hizo pedido',
+                color: AppTheme.statusNoHizoPedido,
+                icon: Icons.remove_shopping_cart_outlined,
+                enabled: enabled,
+                onTap: () =>
+                    onSpecialStatus('no_hizo_pedido', 'No hizo pedido'),
+              ),
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: _specialButton(
+                label: 'Completó el pedido la socia',
+                color: AppTheme.statusCompletoPedidoSocia,
+                icon: Icons.handshake_outlined,
+                enabled: enabled,
+                onTap: () => onSpecialStatus(
+                  'completo_pedido_socia',
+                  'Completó el pedido la socia',
+                ),
+              ),
+            ),
+          ],
+        ),
+        if (canRequestReturn && onRequestReturn != null) ...[
+          const SizedBox(height: 8),
+          _specialButton(
+            label: 'Zona inaccesible — Devolver',
+            color: const Color(0xFF7C3AED),
+            icon: Icons.undo_outlined,
+            enabled: enabled,
+            onTap: onRequestReturn!,
+          ),
+        ],
+      ],
       ),
     );
   }

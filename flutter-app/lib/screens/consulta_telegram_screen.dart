@@ -43,6 +43,7 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
 
   bool _launching = false;
   String? _activeJobId;
+  final _persistedJobIds = <String>{};
 
   @override
   void initState() {
@@ -50,7 +51,7 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
     _selectedClient = widget.initialClient;
     _campaignId = widget.campaignId;
     if (_selectedClient != null) {
-      _dniController.text = _selectedClient!.numeroDocumento;
+      _dniController.text = normalizarDocumento(_selectedClient!.numeroDocumento);
       unawaited(_ensureClientsLoaded());
     }
     _searchController.addListener(_onSearchChanged);
@@ -101,21 +102,24 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
   void _selectClient(ClientModel client) {
     setState(() {
       _selectedClient = client;
-      _dniController.text = client.numeroDocumento;
+      _dniController.text = normalizarDocumento(client.numeroDocumento);
       _searchController.clear();
     });
   }
 
-  String get _dni => _dniController.text.replaceAll(RegExp(r'[^0-9A-Za-z]'), '');
+  String get _dni => normalizarDocumento(
+      _dniController.text.replaceAll(RegExp(r'[^0-9A-Za-z]'), ''));
 
   bool get _canQuery => !_launching && _activeJobId == null && _dni.length >= 7;
 
-  Future<void> _runQuery(List<DoxeoComando> comandos) async {
+  Future<void> _runQuery([List<DoxeoComando>? comandos]) async {
     final profile = context.read<AuthService>().profile;
     if (profile == null) return;
-    DoxeoComando? comando;
-    for (final c in comandos) {
-      if (c.id == _selectedCommandId) comando = c;
+    final lista = comandos ?? await _queue.streamComandos().first;
+    final comando = resolverComando(lista, _selectedCommandId);
+    if (comando == null) {
+      _showSnack('No hay comandos disponibles para consultar.', isError: true);
+      return;
     }
     setState(() => _launching = true);
     try {
@@ -126,15 +130,6 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
             nombreCompleto: 'Consulta libre',
             campaignId: _campaignId ?? '',
           );
-      final yaActiva = await _queue.tieneConsultaActiva(
-        uid: profile.uid,
-        clienteId: cliente.id,
-      );
-      if (yaActiva) {
-        _showSnack('Ya tienes una consulta en curso para este cliente.',
-            isError: true);
-        return;
-      }
       final jobId = await _queue.crearConsulta(
         cliente: cliente,
         solicitante: profile,
@@ -143,11 +138,21 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
       );
       if (!mounted) return;
       setState(() => _activeJobId = jobId);
+    } on DoxeoQuotaException catch (e) {
+      _showSnack(e.message, isError: true);
     } catch (e) {
       _showSnack('No se pudo encolar la consulta: $e', isError: true);
     } finally {
       if (mounted) setState(() => _launching = false);
     }
+  }
+
+  void _persistIfDone(DoxeoJob job) {
+    final cliente = _selectedClient;
+    if (cliente == null) return;
+    if (!debePersistirConsulta(job.estado)) return;
+    if (!_persistedJobIds.add(job.id)) return;
+    unawaited(_queue.guardarConsultaCliente(cliente: cliente, job: job));
   }
 
   void _showSnack(String msg, {bool isError = false}) {
@@ -186,6 +191,10 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
           if (_activeJobId != null) ...[
             const SizedBox(height: 16),
             _buildActiveJob(),
+          ],
+          if (_selectedClient != null) ...[
+            const SizedBox(height: 16),
+            _buildConsultasCliente(),
           ],
           const SizedBox(height: 16),
           _buildHistorialGestor(),
@@ -342,49 +351,44 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
               stream: _queue.streamComandos(),
               builder: (context, snap) {
                 final comandos = snap.data ?? const <DoxeoComando>[];
-                final effectiveId =
-                    comandos.any((c) => c.id == _selectedCommandId)
-                        ? _selectedCommandId
-                        : '';
-                DoxeoComando? comandoSel;
-                for (final c in comandos) {
-                  if (c.id == effectiveId) {
-                    comandoSel = c;
-                    break;
-                  }
-                }
-                final preview =
-                    _dni.isEmpty ? '' : (comandoSel?.previewMessage(_dni) ?? _dni);
+                final comandoSel =
+                    resolverComando(comandos, _selectedCommandId);
+                final preview = _dni.isEmpty || comandoSel == null
+                    ? ''
+                    : comandoSel.previewMessage(_dni);
                 return Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    DropdownButtonFormField<String>(
-                      value: effectiveId,
-                      decoration: InputDecoration(
-                        labelText: 'Consulta (comando)',
-                        border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(12)),
-                      ),
-                      items: [
-                        const DropdownMenuItem(
-                          value: '',
-                          child: Text('Solo DNI (sin comando)'),
+                    if (comandos.isEmpty)
+                      Text(
+                        'Aún no hay comandos creados en el panel (se sincronizan solos).',
+                        style: TextStyle(
+                            fontSize: 12, color: Colors.grey.shade600),
+                      )
+                    else
+                      DropdownButtonFormField<String>(
+                        value: comandoSel!.id,
+                        decoration: InputDecoration(
+                          labelText: 'Consulta (comando)',
+                          border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(12)),
                         ),
-                        ...comandos.map(
-                          (c) => DropdownMenuItem(
-                            value: c.id,
-                            child: Text(
-                              c.plantilla.isEmpty
-                                  ? c.nombre
-                                  : '${c.nombre} · ${c.plantilla}',
-                              overflow: TextOverflow.ellipsis,
+                        items: [
+                          ...comandos.map(
+                            (c) => DropdownMenuItem(
+                              value: c.id,
+                              child: Text(
+                                c.plantilla.isEmpty
+                                    ? c.nombre
+                                    : '${c.nombre} · ${c.plantilla}',
+                                overflow: TextOverflow.ellipsis,
+                              ),
                             ),
                           ),
-                        ),
-                      ],
-                      onChanged: (value) =>
-                          setState(() => _selectedCommandId = value ?? ''),
-                    ),
+                        ],
+                        onChanged: (value) =>
+                            setState(() => _selectedCommandId = value ?? ''),
+                      ),
                     const SizedBox(height: 10),
                     TextField(
                       controller: _dniController,
@@ -435,12 +439,19 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
       stream: _queue.streamComandos(),
       builder: (context, snap) {
         final comandos = snap.data ?? const <DoxeoComando>[];
+        final buttonHint = hint.isNotEmpty
+            ? hint
+            : (comandos.isEmpty
+                ? 'No hay comandos disponibles para consultar'
+                : '');
         return Column(
           children: [
             SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
-                onPressed: _canQuery ? () => _runQuery(comandos) : null,
+                onPressed: _canQuery && comandos.isNotEmpty
+                    ? () => _runQuery(comandos)
+                    : null,
                 icon: _launching
                     ? const SizedBox(
                         width: 18,
@@ -457,11 +468,11 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
                 ),
               ),
             ),
-            if (hint.isNotEmpty)
+            if (buttonHint.isNotEmpty)
               Padding(
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(
-                  hint,
+                  buttonHint,
                   style: const TextStyle(
                       fontSize: 11, color: AppTheme.textSecondary),
                 ),
@@ -482,6 +493,7 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
         if (job == null) {
           return const Center(child: CircularProgressIndicator());
         }
+        _persistIfDone(job);
         return Card(
           child: Padding(
             padding: const EdgeInsets.all(14),
@@ -491,6 +503,12 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
               onCancel: job.isPending
                   ? () => _queue.cancelarJob(job.id)
                   : null,
+              onRetry: job.canRetry
+                  ? () {
+                      setState(() => _activeJobId = null);
+                      unawaited(_runQuery());
+                    }
+                  : null,
               onClose: job.isDone
                   ? () => setState(() => _activeJobId = null)
                   : null,
@@ -498,6 +516,46 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
           ),
         );
       },
+    );
+  }
+
+  Widget _buildConsultasCliente() {
+    final cliente = _selectedClient;
+    if (cliente == null) return const SizedBox.shrink();
+    final clienteId = cliente.id.isNotEmpty ? cliente.id : cliente.codigoCliente;
+    if (cliente.campaignId.isEmpty ||
+        cliente.seccionKey.isEmpty ||
+        clienteId.isEmpty) {
+      return _cardConsultas(parseDoxeoConsultas(cliente.doxeoConsultasRaw));
+    }
+    return StreamBuilder<List<DoxeoJob>>(
+      stream: _queue.streamConsultasCliente(
+        campaignId: cliente.campaignId,
+        seccionKey: cliente.seccionKey,
+        clienteId: clienteId,
+      ),
+      builder: (context, snap) {
+        final fromDoc = snap.hasError
+            ? const <DoxeoJob>[]
+            : (snap.data ?? const <DoxeoJob>[]);
+        final fromClient = parseDoxeoConsultas(cliente.doxeoConsultasRaw);
+        return _cardConsultas(ultimasConsultasPorTipo([...fromDoc, ...fromClient]));
+      },
+    );
+  }
+
+  Widget _cardConsultas(List<DoxeoJob> consultas) {
+    final visible = consultas.where((j) => j.id != _activeJobId).toList();
+    if (visible.isEmpty) return const SizedBox.shrink();
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: DoxeoConsultasGuardadas(
+          consultas: visible,
+          queue: _queue,
+          hideJobId: _activeJobId,
+        ),
+      ),
     );
   }
 
@@ -529,7 +587,7 @@ class _ConsultaTelegramScreenState extends State<ConsultaTelegramScreen> {
                     dense: true,
                     leading: DoxeoJobStatusDot(estado: job.estado),
                     title: Text(
-                      job.comandoNombre.isEmpty ? 'Solo DNI' : job.comandoNombre,
+                      job.comandoNombre.isEmpty ? 'Consulta' : job.comandoNombre,
                       style: const TextStyle(
                           fontSize: 12, fontWeight: FontWeight.w600),
                     ),

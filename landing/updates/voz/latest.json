@@ -1,0 +1,11 @@
+{
+  "version": "1.0.29",
+  "filename": "Cobranzas-Setup-1.0.29.exe",
+  "url": "https://clase-001.web.app/updates/voz/Cobranzas-Setup-1.0.29.zip",
+  "sha256": "50b859ee67ae52ce76a85292b25112f7315d2430b2cf1fb7dab05a88b100317e",
+  "notes": "Cola APK Telegram: gestores encolan consultas desde el campo; TWI escribe el comando y devuelve el resultado.",
+  "min_version": "1.0.29",
+  "published_at": "2026-08-17T20:40:46Z",
+  "product": "cobranzas-voz",
+  "package": "Cobranzas-Setup-1.0.29.zip"
+}

@@ -2,13 +2,22 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../config/theme.dart';
 import '../../models/client_model.dart';
-import '../../utils/phone_contact_launcher.dart';
+import '../../utils/whatsapp_send_helper.dart';
 
 /// Contact strip for call-center gestors: phone, WhatsApp, email, address (no GPS).
 class ClientDetailCallContact extends StatelessWidget {
   final ClientModel client;
+  final Future<void> Function({
+    required String type,
+    required String phone,
+    required bool launchSuccess,
+  })? onActivityEvent;
 
-  const ClientDetailCallContact({super.key, required this.client});
+  const ClientDetailCallContact({
+    super.key,
+    required this.client,
+    this.onActivityEvent,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -218,7 +227,13 @@ class ClientDetailCallContact extends StatelessWidget {
   Future<void> _dial(BuildContext context, String phone) async {
     final normalized = phone.replaceAll(RegExp(r'[^\d+]'), '');
     final uri = Uri(scheme: 'tel', path: normalized);
-    if (!await launchUrl(uri, mode: LaunchMode.externalApplication)) {
+    final launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    await onActivityEvent?.call(
+      type: 'llamada_iniciada',
+      phone: phone,
+      launchSuccess: launched,
+    );
+    if (!launched) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('No se pudo abrir el marcador para $phone')),
@@ -228,9 +243,15 @@ class ClientDetailCallContact extends StatelessWidget {
   }
 
   Future<void> _openWhatsApp(BuildContext context, String phone) async {
-    final launched = await launchWhatsApp(
+    final launched = await openWhatsAppWithPlantilla(
+      context: context,
+      client: client,
       phone: phone,
-      clientName: client.displayName,
+    );
+    await onActivityEvent?.call(
+      type: 'whatsapp_abierto',
+      phone: phone,
+      launchSuccess: launched,
     );
     if (!context.mounted || launched) return;
     ScaffoldMessenger.of(context).showSnackBar(

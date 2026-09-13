@@ -3,7 +3,9 @@ import '../config/theme.dart';
 import '../models/client_model.dart';
 import 'consulta_telegram_screen.dart';
 import '../services/alert_service.dart';
+import '../services/caso_service.dart';
 import '../services/firestore_service.dart';
+import '../utils/caso_problema.dart';
 import '../services/document_download_service.dart';
 import '../services/letter_jpg_publish_service.dart';
 import '../services/letter_jpg_templates.dart';
@@ -14,6 +16,7 @@ import '../utils/open_local_file.dart';
 import '../services/location_service.dart';
 import '../services/campaign_service.dart';
 import '../services/auth_service.dart';
+import '../services/notification_service.dart';
 import '../services/nivel_catalog_service.dart';
 import '../services/etiqueta_catalog_service.dart';
 import '../models/visita_historial.dart';
@@ -21,6 +24,7 @@ import '../utils/client_status_ui.dart';
 import '../utils/direcciones_conocidas.dart';
 import '../utils/section_utils.dart';
 import '../widgets/destination_gestor_picker.dart';
+import '../widgets/client_detail/client_detail_descargo_section.dart';
 import '../widgets/client_detail/client_detail_gestion_card.dart';
 import '../widgets/client_detail/client_detail_gps_strip.dart';
 import '../widgets/client_detail/client_detail_hero.dart';
@@ -34,6 +38,7 @@ import '../widgets/client_detail/client_detail_debts_section.dart';
 import '../widgets/client_detail/client_detail_doxeo_section.dart';
 import '../widgets/client_detail/client_detail_history_section.dart';
 import '../widgets/client_detail/client_detail_tags_section.dart';
+import '../widgets/client_detail/client_detail_semaforo_section.dart';
 import 'package:provider/provider.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -43,6 +48,7 @@ class ClientDetailScreen extends StatefulWidget {
   final String campaignId;
   final String section;
   final bool embedded;
+  final bool readOnly;
   final VoidCallback? onUpdated;
 
   const ClientDetailScreen({
@@ -51,6 +57,7 @@ class ClientDetailScreen extends StatefulWidget {
     required this.campaignId,
     required this.section,
     this.embedded = false,
+    this.readOnly = false,
     this.onUpdated,
   });
 
@@ -61,6 +68,7 @@ class ClientDetailScreen extends StatefulWidget {
 class _ClientDetailScreenState extends State<ClientDetailScreen> {
   final _firestoreService = FirestoreService();
   final _alertService = AlertService();
+  final _casoService = CasoService();
   final _locationService = LocationService();
   final _notesController = TextEditingController();
   final _contactPhoneController = TextEditingController();
@@ -94,6 +102,7 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
   List<VisitaHistorial> _visitHistory = [];
   bool _loadingVisitHistory = false;
   bool _savingTags = false;
+  bool _savingSemaforo = false;
 
   // Nivel selection state
   bool _catalogLoading = true;
@@ -148,13 +157,7 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
       if (mounted) setState(() => _relatedAccounts = accounts);
     } catch (e) {
       debugPrint('Error cargando cuentas relacionadas: $e');
-      if (mounted) {
-        setState(() => _relatedAccounts = [_client]);
-        _showSnackbar(
-          'No se pudieron cargar otras cuentas del mismo DNI',
-          isError: true,
-        );
-      }
+      if (mounted) setState(() => _relatedAccounts = [_client]);
     } finally {
       if (mounted) setState(() => _loadingRelated = false);
     }
@@ -191,7 +194,11 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
   }
 
   Future<void> _saveClientTags(List<String> tags) async {
-    setState(() => _savingTags = true);
+    final previous = List<String>.from(_client.etiquetas);
+    setState(() {
+      _savingTags = true;
+      _client = _client.copyWith(etiquetas: tags);
+    });
     try {
       await _firestoreService.updateClientTags(
         campaignId: widget.campaignId,
@@ -200,14 +207,43 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
         etiquetas: tags,
       );
       if (mounted) {
-        setState(() => _client = _client.copyWith(etiquetas: tags));
         _markUpdated(navigateBack: false);
         _showSnackbar('Etiquetas actualizadas', isSuccess: true);
       }
     } catch (e) {
-      if (mounted) _showSnackbar('Error al guardar etiquetas: $e', isError: true);
+      if (mounted) {
+        setState(() => _client = _client.copyWith(etiquetas: previous));
+        _showSnackbar(_friendlyTagsError(e), isError: true);
+      }
     } finally {
       if (mounted) setState(() => _savingTags = false);
+    }
+  }
+
+  Future<void> _saveClientSemaforo(String value) async {
+    final previous = _client.semaforo;
+    setState(() {
+      _savingSemaforo = true;
+      _client = _client.copyWith(semaforo: value);
+    });
+    try {
+      await _firestoreService.updateClientSemaforo(
+        campaignId: widget.campaignId,
+        section: widget.section,
+        clientId: _client.id,
+        semaforo: value,
+      );
+      if (mounted) {
+        _markUpdated(navigateBack: false);
+        _showSnackbar('Semáforo actualizado', isSuccess: true);
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _client = _client.copyWith(semaforo: previous));
+        _showSnackbar(_friendlySemaforoError(e), isError: true);
+      }
+    } finally {
+      if (mounted) setState(() => _savingSemaforo = false);
     }
   }
 
@@ -216,6 +252,10 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
     super.didChangeDependencies();
     if (_callModeInit) return;
     _callModeInit = true;
+    if (widget.readOnly) {
+      _gpsLoading = false;
+      return;
+    }
     if (_isCallGestor(context)) {
       _canal = 'TEL';
       _gpsLoading = false;
@@ -312,6 +352,7 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
         montoPromesaPago: _montoPromesa > 0 ? _montoPromesa : null,
         gestorUid: auth.firebaseUser?.uid ?? auth.profile?.uid ?? '',
         gestorNombre: auth.profile?.nombre ?? '',
+        usuarioRol: auth.profile?.rol ?? '',
       );
 
       if (!isCall) {
@@ -341,21 +382,39 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
         );
       }
 
-      // Create alert for special states
-      if (estado == 'suplantacion' || estado == 'pago_no_registrado') {
-        await _alertService.createAlert(
+      // Abrir caso en embudo para estados especiales (reemplaza alertas de estos tipos).
+      if (isCasoTipo(estado)) {
+        await _casoService.openOrReopenCaso(
           tipo: estado,
           campaignId: widget.campaignId,
           section: widget.section,
-          clientId: _client.id,
-          clientName: _client.displayName,
-          clientDni: _client.numeroDocumento,
+          client: _client,
           nota: _notesController.text.trim(),
           lat: isCall ? null : _locationService.latitude,
           lng: isCall ? null : _locationService.longitude,
+          gestorUid: auth.firebaseUser?.uid ?? auth.profile?.uid ?? '',
           gestorEmail: auth.profile?.email ?? '',
           gestorName: auth.profile?.nombre ?? '',
         );
+      } else if (!isSpecialState) {
+        // Red de seguridad: niveles de reclamo → caso (sin cambiar estado_gestion).
+        final tipoDesdeNivel = casoTipoFromNivel3(_nivel3);
+        if (tipoDesdeNivel != null) {
+          await _casoService.openOrReopenCaso(
+            tipo: tipoDesdeNivel,
+            campaignId: widget.campaignId,
+            section: widget.section,
+            client: _client,
+            nota: _notesController.text.trim().isNotEmpty
+                ? _notesController.text.trim()
+                : 'Detectado por nivel: $_nivel3',
+            lat: isCall ? null : _locationService.latitude,
+            lng: isCall ? null : _locationService.longitude,
+            gestorUid: auth.firebaseUser?.uid ?? auth.profile?.uid ?? '',
+            gestorEmail: auth.profile?.email ?? '',
+            gestorName: auth.profile?.nombre ?? '',
+          );
+        }
       }
 
       await _loadVisitHistory();
@@ -368,6 +427,29 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
     } finally {
       if (mounted) setState(() => _saving = false);
     }
+  }
+
+  Future<void> _recordContactActivity({
+    required String type,
+    required String phone,
+    required bool launchSuccess,
+  }) async {
+    final auth = context.read<AuthService>();
+    final profile = auth.profile;
+    final uid = auth.firebaseUser?.uid ?? profile?.uid ?? '';
+    if (profile == null || uid.isEmpty) return;
+    await _firestoreService.recordUserActivityEvent(
+      gestorUid: uid,
+      gestorNombre: profile.nombre,
+      seccionKey: widget.section,
+      canalGestor: profile.isCallGestor ? 'call' : 'campo',
+      campaignId: widget.campaignId,
+      clientId: _client.id,
+      clientName: _client.displayName,
+      type: type,
+      phone: phone,
+      launchSuccess: launchSuccess,
+    );
   }
 
   Future<void> _loadDireccionesConocidas() async {
@@ -445,6 +527,7 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
         accuracy: _locationService.lastPosition?.accuracy,
         gestorUid: auth.profile?.uid ?? '',
         gestorNombre: auth.profile?.nombre ?? '',
+        usuarioRol: auth.profile?.rol ?? '',
         recordHistorial: true,
       );
       _markUpdated();
@@ -631,6 +714,7 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
     final client = _client;
     final isCall = _isCallGestor(context);
     final isGestor = context.read<AuthService>().profile?.isGestor ?? false;
+    final readOnly = widget.readOnly;
     final gpsReady = _gpsReadyFor(context);
 
     final body = _saving
@@ -645,63 +729,15 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
             ),
           )
         : SingleChildScrollView(
-            padding: const EdgeInsets.all(12),
+            padding: EdgeInsets.all(widget.embedded ? 8 : 12),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                // 1. Identidad + deuda (siempre visible, compacto).
                 ClientDetailHero(client: client),
-                ClientDetailDebtsSection(
-                  currentClient: client,
-                  relatedAccounts: _relatedAccounts.isNotEmpty
-                      ? _relatedAccounts
-                      : [client],
-                  loading: _loadingRelated,
-                ),
-                ClientDetailTagsSection(
-                  client: client,
-                  catalogService: _etiquetaCatalog,
-                  saving: _savingTags,
-                  onSave: _saveClientTags,
-                ),
-                ClientDetailDoxeoSection(client: client),
-                ClientDetailHistorySection(
-                  visitas: _visitHistory,
-                  loading: _loadingVisitHistory,
-                  showCombinedLabel: client.numeroDocumento.isNotEmpty,
-                ),
-                if (isCall) ClientDetailCallContact(client: client),
-                if (isCall)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 12),
-                    child: ClientDetailContactAgendaSection(
-                      direcciones: _direccionesConocidas,
-                      loading: _loadingDirecciones,
-                      onUpdateEntry: _updateContactEntry,
-                      onReorderEntry: _reorderContactEntry,
-                    ),
-                  ),
-                if (!isCall)
-                  ClientDetailGpsStrip(
-                    gpsLoading: _gpsLoading,
-                    gpsReady: gpsReady,
-                    gpsError: _locationService.error,
-                    client: client,
-                    verifiedDateFormatted:
-                        _formatVerifiedDate(client.ubicacionVerificadaFecha),
-                    savingVerifiedLocation: _savingVerifiedLocation,
-                    saving: _saving,
-                    onRetry: _captureGps,
-                    onOpenSettings:
-                        _locationService.error?.contains('Configuración') ==
-                                    true ||
-                                _locationService.error?.contains('bloqueado') ==
-                                    true
-                            ? () => _locationService.openAppSettings()
-                            : null,
-                    onSaveVerified: _confirmAndSaveVerifiedLocation,
-                    onOpenVerifiedMaps: _openVerifiedInMaps,
-                  ),
-                if (isGestor)
+                // 2. Acción principal primero: el gestor abre la ficha para
+                // registrar, no para leer. Evita scroll largo antes de actuar.
+                if (isGestor && !readOnly)
                   ClientDetailGestionCard(
                     catalogLoading: _catalogLoading,
                     catalogLoaded: _catalogLoaded,
@@ -744,12 +780,82 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
                     onPickFechaPromesa: _pickFechaPromesa,
                     onMontoChanged: (v) => _montoPromesa = v,
                     onRegister: _onRegisterGestion,
-                    onSpecialStatus: isCall ? (_, __) {} : _confirmSpecialStatus,
+                    onSpecialStatus: _confirmSpecialStatus,
                     canRequestReturn: !isCall && _client.isPendiente,
                     onRequestReturn:
                         !isCall && _client.isPendiente ? _confirmReturnRequest : null,
                   ),
-                if (!isCall)
+                // 3. Contexto de deuda / etiquetas / historial reciente.
+                ClientDetailDebtsSection(
+                  currentClient: client,
+                  relatedAccounts: _relatedAccounts.isNotEmpty
+                      ? _relatedAccounts
+                      : [client],
+                  loading: _loadingRelated,
+                ),
+                ClientDetailSemaforoSection(
+                  client: client,
+                  saving: _savingSemaforo,
+                  onSave: readOnly ? (_) {} : _saveClientSemaforo,
+                ),
+                ClientDetailTagsSection(
+                  client: client,
+                  catalogService: _etiquetaCatalog,
+                  saving: _savingTags,
+                  onSave: readOnly ? (_) {} : _saveClientTags,
+                ),
+                ClientDetailHistorySection(
+                  visitas: _visitHistory,
+                  loading: _loadingVisitHistory,
+                  showCombinedLabel: client.numeroDocumento.isNotEmpty,
+                ),
+                // Descargo: lo que respondió la persona contactada + foto/audio.
+                if (!readOnly)
+                  ClientDetailDescargoSection(
+                    campaignId: widget.campaignId,
+                    section: widget.section,
+                    clientId: _client.id,
+                    currentLat: _locationService.latitude,
+                    currentLng: _locationService.longitude,
+                    readOnly: readOnly,
+                  ),
+                if (isCall && !readOnly)
+                  ClientDetailCallContact(
+                    client: client,
+                    onActivityEvent: _recordContactActivity,
+                  ),
+                if (isCall && !readOnly)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: ClientDetailContactAgendaSection(
+                      direcciones: _direccionesConocidas,
+                      loading: _loadingDirecciones,
+                      onUpdateEntry: _updateContactEntry,
+                      onReorderEntry: _reorderContactEntry,
+                    ),
+                  ),
+                if (!isCall && !readOnly)
+                  ClientDetailGpsStrip(
+                    gpsLoading: _gpsLoading,
+                    gpsReady: gpsReady,
+                    gpsError: _locationService.error,
+                    client: client,
+                    verifiedDateFormatted:
+                        _formatVerifiedDate(client.ubicacionVerificadaFecha),
+                    savingVerifiedLocation: _savingVerifiedLocation,
+                    saving: _saving,
+                    onRetry: _captureGps,
+                    onOpenSettings:
+                        _locationService.error?.contains('Configuración') ==
+                                    true ||
+                                _locationService.error?.contains('bloqueado') ==
+                                    true
+                            ? () => _locationService.openAppSettings()
+                            : null,
+                    onSaveVerified: _confirmAndSaveVerifiedLocation,
+                    onOpenVerifiedMaps: _openVerifiedInMaps,
+                  ),
+                if (!isCall && !readOnly)
                   ClientDetailLocationSection(
                     client: client,
                     direcciones: _direccionesConocidas,
@@ -772,7 +878,17 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
                     onUpdateContactEntry: _updateContactEntry,
                     onReorderContactEntry: _reorderContactEntry,
                   ),
-                if (!isCall)
+                // 4. Herramientas secundarias al final (no bloquean la gestión).
+                ClientDetailDoxeoSection(client: client),
+                if (!isCall && !readOnly)
+                  ClientDetailLettersSection(
+                    letters: _letters,
+                    loading: _lettersLoading,
+                    generating: _generatingLetter,
+                    onMenuAction: _onLetterMenuAction,
+                    onGenerate: _generateLetterJpg,
+                  ),
+                if (!isCall && !readOnly)
                   ClientDetailWordSection(
                     generating: _generatingWord,
                     selectedTemplate: _selectedWordTemplate,
@@ -797,7 +913,7 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
                   onFillAddressWithGps: isCall ? null : _fillAddressWithGps,
                   onSaveContact: _saveContactUpdate,
                 ),
-                if (!isCall) _buildZoneEditButton(client),
+                _buildZoneEditButton(client),
                 const SizedBox(height: 16),
               ],
             ),
@@ -957,13 +1073,21 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
     if (!auth.isAdmin && !auth.isSupervisor) {
       return const SizedBox.shrink();
     }
+    final isCallClient = callSectionUid(widget.section) != null;
     return Padding(
       padding: const EdgeInsets.only(bottom: 12),
       child: OutlinedButton.icon(
         onPressed: () => _showZoneEditDialog(client),
-        icon: const Icon(Icons.edit_location_alt_outlined, size: 18),
+        icon: Icon(
+          isCallClient
+              ? Icons.swap_horiz_rounded
+              : Icons.edit_location_alt_outlined,
+          size: 18,
+        ),
         label: Text(
-          'Cambiar Zona (${widget.section})',
+          isCallClient
+              ? 'Mover a otra gestora call'
+              : 'Cambiar Zona (${widget.section})',
           style: const TextStyle(fontSize: 13),
         ),
         style: OutlinedButton.styleFrom(
@@ -980,16 +1104,30 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
     final gestores = await _firestoreService.getGestoresActivos();
     final sections =
         await _firestoreService.resolveDestinationSections(widget.campaignId);
-    final options = buildDestinationOptions(
+    final isCallClient = callSectionUid(widget.section) != null;
+    var options = buildDestinationOptions(
       gestores: gestores,
       destinationSections: sections,
     );
-    final filtered = options
-        .where((o) => o.sectionKey != widget.section)
-        .toList();
+    if (isCallClient) {
+      options = options
+          .where((o) =>
+              o.gestor?.isCallGestor == true &&
+              o.sectionKey != widget.section)
+          .toList();
+    } else {
+      options = options
+          .where((o) => o.sectionKey != widget.section)
+          .toList();
+    }
 
-    if (filtered.isEmpty) {
-      _showSnackbar('No hay secciones destino disponibles', isError: true);
+    if (options.isEmpty) {
+      _showSnackbar(
+        isCallClient
+            ? 'No hay otras gestoras call disponibles'
+            : 'No hay secciones destino disponibles',
+        isError: true,
+      );
       return;
     }
 
@@ -997,21 +1135,31 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
 
     final selected = await showDestinationPickerDialog(
       context: context,
-      options: filtered,
-      initialSectionKey: filtered.first.sectionKey,
-      title: 'Cambiar Zona / Sección',
+      options: options,
+      initialSectionKey: options.first.sectionKey,
+      title: isCallClient
+          ? 'Mover a gestora call'
+          : 'Cambiar Zona / Sección',
     );
 
     if (selected == null || !mounted) return;
 
+    final destLabel = options
+        .firstWhere(
+          (o) => o.sectionKey == selected,
+          orElse: () => options.first,
+        )
+        .label;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-        title: const Text('Confirmar cambio de zona'),
+        title: Text(isCallClient ? 'Confirmar movimiento' : 'Confirmar cambio de zona'),
         content: Text(
-          '¿Mover a "${client.displayName}" de\n'
-          '${sectionDisplayLabel(widget.section)} → ${sectionDisplayLabel(selected)}?',
+          isCallClient
+              ? '¿Mover a "${client.displayName}" a $destLabel?'
+              : '¿Mover a "${client.displayName}" de\n'
+                  '${sectionDisplayLabel(widget.section)} → ${sectionDisplayLabel(selected)}?',
         ),
         actions: [
           TextButton(
@@ -1029,6 +1177,22 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
     if (confirmed != true || !mounted) return;
 
     final auth = context.read<AuthService>();
+    final destUid = callSectionUid(selected);
+    String destNombre = destUid ?? '';
+    for (final option in options) {
+      if (option.sectionKey == selected) {
+        destNombre = option.gestor?.nombre ?? destNombre;
+        break;
+      }
+    }
+    final extra = <String, dynamic>{};
+    if (destUid != null) {
+      extra['call_gestor_uid'] = destUid;
+      extra['call_gestor_nombre'] = destNombre;
+      extra['fase_gestion'] = 'call';
+      extra['call_asignacion_manual'] = true;
+    }
+
     final result = await _firestoreService.updateClientZone(
       campaignId: widget.campaignId,
       currentSectionKey: widget.section,
@@ -1036,12 +1200,25 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
       newSectionKey: selected,
       adminEmail: auth.profile?.email ?? '',
       adminName: auth.profile?.nombre ?? '',
-      motivo: 'edicion_manual',
+      motivo: isCallClient ? 'reasignacion_call_manual' : 'edicion_manual',
+      extraFields: extra.isEmpty ? null : extra,
     );
 
     if (result['success'] == true) {
+      if (isCallClient && destUid != null && destUid.isNotEmpty) {
+        await NotificationService().notifyClientReassigned(
+          campaignId: widget.campaignId,
+          destinatarioUid: destUid,
+          seccionKey: selected,
+          clientId: _client.id,
+          clientName: client.displayName,
+          motivo: 'reasignacion_call_manual',
+        );
+      }
       _showSnackbar(
-        'Zona actualizada a ${sectionDisplayLabel(selected)}',
+        isCallClient
+            ? 'Cliente movido a $destLabel'
+            : 'Zona actualizada a ${sectionDisplayLabel(selected)}',
         isSuccess: true,
       );
       _markUpdated(navigateBack: true);
@@ -1069,7 +1246,8 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         title: const Text('Confirmar Estado Especial'),
         content: Text('¿Marcar como "$label"?\n\n'
-            'Esto generará una alerta a central y registrará la ubicación GPS.'),
+            'Se abrirá un caso en el embudo del resolutor'
+            '${_isCallGestor(context) ? '.' : ' y se registrará la ubicación GPS.'}'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
@@ -1239,6 +1417,40 @@ class _ClientDetailScreenState extends State<ClientDetailScreen> {
         ],
       ),
     );
+  }
+
+  String _friendlyTagsError(Object error) {
+    final text = error.toString();
+    if (text.contains('permission-denied') || text.contains('PERMISSION_DENIED')) {
+      return 'No tienes permiso para guardar etiquetas en esta cuenta.';
+    }
+    if (text.contains('not-found') || text.contains('NOT_FOUND')) {
+      return 'No se encontró el cliente para guardar las etiquetas.';
+    }
+    if (text.contains('INTERNAL ASSERTION FAILED') ||
+        text.contains('Unexpected state') ||
+        text.contains('no quedaron guardadas') ||
+        text.contains('Recarga la página')) {
+      return 'No se pudieron guardar las etiquetas. Recarga la página e inténtalo de nuevo.';
+    }
+    return 'Error al guardar etiquetas. Inténtalo de nuevo.';
+  }
+
+  String _friendlySemaforoError(Object error) {
+    final text = error.toString();
+    if (text.contains('permission-denied') || text.contains('PERMISSION_DENIED')) {
+      return 'No tienes permiso para guardar el semáforo en esta cuenta.';
+    }
+    if (text.contains('not-found') || text.contains('NOT_FOUND')) {
+      return 'No se encontró el cliente para guardar el semáforo.';
+    }
+    if (text.contains('INTERNAL ASSERTION FAILED') ||
+        text.contains('Unexpected state') ||
+        text.contains('no quedó guardado') ||
+        text.contains('Recarga la página')) {
+      return 'No se pudo guardar el semáforo. Recarga la página e inténtalo de nuevo.';
+    }
+    return 'Error al guardar el semáforo. Inténtalo de nuevo.';
   }
 
   void _showSnackbar(String message, {bool isError = false, bool isSuccess = false}) {

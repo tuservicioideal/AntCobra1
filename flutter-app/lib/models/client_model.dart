@@ -1,3 +1,5 @@
+import 'semaforo.dart';
+
 /// Client data model matching the Firestore document structure.
 class CartaGenerada {
   final String id;
@@ -71,12 +73,20 @@ class ClientModel {
   /// False when client was removed from bank Excel (soft archive).
   final bool activoEnCartera;
   final String fechaAsignacion;
+  /// Fecha de cierre programada del Excel (columna AP), string crudo.
+  final String fechaCierre;
+  /// Fecha de cierre ISO (`yyyy-MM-dd`) si el admin la publica.
+  final String fechaCierreDt;
   final int diaCiclo;
   final String estadoCiclo;
   final bool gestionEspecial;
   final String motivoGestionEspecial;
   final List<String> etiquetas;
+  /// Semáforo de voluntad de pago: rojo|naranja|amarillo|lima|verde|''.
+  final String semaforo;
   final int cuentasMismoDni;
+  /// Última consulta Telegram por tipo (`doxeo_consultas` en Firestore).
+  final Map<String, dynamic> doxeoConsultasRaw;
 
   ClientModel({
     required this.id,
@@ -122,12 +132,16 @@ class ClientModel {
     this.actualizadoPorNombre = '',
     this.activoEnCartera = true,
     this.fechaAsignacion = '',
+    this.fechaCierre = '',
+    this.fechaCierreDt = '',
     this.diaCiclo = 1,
     this.estadoCiclo = 'activa',
     this.gestionEspecial = false,
     this.motivoGestionEspecial = '',
     this.etiquetas = const [],
+    this.semaforo = '',
     this.cuentasMismoDni = 1,
+    this.doxeoConsultasRaw = const {},
   });
 
   static List<String> _parseEtiquetas(dynamic raw) {
@@ -135,6 +149,11 @@ class ClientModel {
       return raw.map((e) => e.toString()).where((e) => e.isNotEmpty).toList();
     }
     return const [];
+  }
+
+  static Map<String, dynamic> _parseMap(dynamic raw) {
+    if (raw is Map) return Map<String, dynamic>.from(raw);
+    return const {};
   }
 
   static bool _parseActivoEnCartera(Map<String, dynamic> data) {
@@ -245,12 +264,16 @@ class ClientModel {
       fechaAsignacion: data['fecha_asignacion']?.toString() ??
           data['fecha_asignacion_dt']?.toString() ??
           '',
+      fechaCierre: data['fecha_cierre']?.toString() ?? '',
+      fechaCierreDt: data['fecha_cierre_dt']?.toString() ?? '',
       diaCiclo: (data['dia_ciclo'] as num?)?.toInt() ?? 1,
       estadoCiclo: data['estado_ciclo']?.toString() ?? 'activa',
       gestionEspecial: data['gestion_especial'] == true,
       motivoGestionEspecial:
           data['motivo_gestion_especial']?.toString() ?? '',
       etiquetas: _parseEtiquetas(data['etiquetas']),
+      semaforo: normalizeSemaforo(data['semaforo']?.toString()),
+      doxeoConsultasRaw: _parseMap(data['doxeo_consultas']),
     );
   }
 
@@ -313,7 +336,12 @@ class ClientModel {
     return name[0].toUpperCase();
   }
 
-  ClientModel copyWith({List<String>? etiquetas, int? cuentasMismoDni}) {
+  ClientModel copyWith({
+    List<String>? etiquetas,
+    String? semaforo,
+    int? cuentasMismoDni,
+    Map<String, dynamic>? doxeoConsultasRaw,
+  }) {
     return ClientModel(
       id: id,
       campaignId: campaignId,
@@ -358,12 +386,16 @@ class ClientModel {
       actualizadoPorNombre: actualizadoPorNombre,
       activoEnCartera: activoEnCartera,
       fechaAsignacion: fechaAsignacion,
+      fechaCierre: fechaCierre,
+      fechaCierreDt: fechaCierreDt,
       diaCiclo: diaCiclo,
       estadoCiclo: estadoCiclo,
       gestionEspecial: gestionEspecial,
       motivoGestionEspecial: motivoGestionEspecial,
       etiquetas: etiquetas ?? this.etiquetas,
+      semaforo: semaforo ?? this.semaforo,
       cuentasMismoDni: cuentasMismoDni ?? this.cuentasMismoDni,
+      doxeoConsultasRaw: doxeoConsultasRaw ?? this.doxeoConsultasRaw,
     );
   }
 }

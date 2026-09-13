@@ -1,6 +1,6 @@
 import 'package:url_launcher/url_launcher.dart';
 
-const _defaultWhatsAppMessageTemplate =
+const defaultWhatsAppMessageTemplate =
     'Hola {nombre}, le escribo desde App Recaudo Legal respecto a su cuenta. ¿Podemos coordinar?';
 
 /// Strips formatting and normalizes Peruvian mobile numbers for wa.me (E.164 without +).
@@ -24,9 +24,30 @@ String? normalizePhoneForWhatsApp(
   return null;
 }
 
-String buildWhatsAppMessage({required String clientName}) {
+/// Construye el mensaje. Si [cuerpo] es null/vacío usa el template por defecto.
+String buildWhatsAppMessage({
+  required String clientName,
+  String? cuerpo,
+  Map<String, String>? values,
+}) {
   final name = clientName.trim().isNotEmpty ? clientName.trim() : 'estimado/a';
-  return _defaultWhatsAppMessageTemplate.replaceAll('{nombre}', name);
+  final template =
+      (cuerpo != null && cuerpo.trim().isNotEmpty)
+          ? cuerpo
+          : defaultWhatsAppMessageTemplate;
+  if (values != null && values.isNotEmpty) {
+    final merged = Map<String, String>.from(values);
+    merged.putIfAbsent('nombre', () => name);
+    return template.replaceAllMapped(RegExp(r'\{([a-z_]+)\}'), (m) {
+      final key = m.group(1)!;
+      final v = merged[key];
+      if (v == null || v.isEmpty) {
+        return key == 'nombre' ? name : '—';
+      }
+      return v;
+    });
+  }
+  return template.replaceAll('{nombre}', name);
 }
 
 Uri? buildWhatsAppUri({
@@ -44,10 +65,12 @@ Future<bool> launchWhatsApp({
   required String phone,
   required String clientName,
   String countryCode = '51',
+  String? message,
 }) async {
+  final text = message ?? buildWhatsAppMessage(clientName: clientName);
   final uri = buildWhatsAppUri(
     phone: phone,
-    message: buildWhatsAppMessage(clientName: clientName),
+    message: text,
     countryCode: countryCode,
   );
   if (uri == null) return false;

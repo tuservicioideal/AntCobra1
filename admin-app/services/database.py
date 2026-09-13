@@ -40,6 +40,8 @@ class EstadoGestion(str, enum.Enum):
     FALLECIDO_INUBICABLE = "fallecido_inubicable"
     SUPLANTACION = "suplantacion"
     PAGO_NO_REGISTRADO = "pago_no_registrado"
+    NO_HIZO_PEDIDO = "no_hizo_pedido"
+    COMPLETO_PEDIDO_SOCIA = "completo_pedido_socia"
     DEVOLUCION_PENDIENTE = "devolucion_pendiente"
 
 
@@ -285,6 +287,9 @@ class Cliente(Base):
 
     # Etiquetas de seguimiento (IDs del catálogo global, JSON array)
     etiquetas: Mapped[Optional[str]] = mapped_column(Text, default="[]")
+
+    # Semáforo de voluntad de pago (rojo|naranja|amarillo|lima|verde|'')
+    semaforo: Mapped[str] = mapped_column(String(20), default="")
 
     # Metadatos
     sincronizado_firebase: Mapped[bool] = mapped_column(Boolean, default=False)
@@ -835,7 +840,7 @@ class PlantillaCarta(Base):
 #  DATABASE ENGINE & SESSION MANAGEMENT
 # ══════════════════════════════════════════════════════════════════
 
-CURRENT_SCHEMA_VERSION = 20
+CURRENT_SCHEMA_VERSION = 21
 
 DB_FILENAME = "antcobranzas.db"
 
@@ -1145,6 +1150,25 @@ class DatabaseService:
                 sv.applied_at = datetime.now()
                 sv.description = "v20: historial_visita.cliente_id nullable (SET NULL)"
                 session.commit()
+
+            if sv.version < 21:
+                self._migrate_v21(session)
+                sv.version = 21
+                sv.applied_at = datetime.now()
+                sv.description = "v21: clientes.semaforo voluntad de pago"
+                session.commit()
+
+    def _migrate_v21(self, session: Session) -> None:
+        """Semáforo de voluntad de pago en clientes."""
+        conn = session.connection()
+        text_mod = __import__("sqlalchemy").text
+        try:
+            conn.execute(text_mod(
+                "ALTER TABLE clientes ADD COLUMN semaforo VARCHAR(20) DEFAULT ''"
+            ))
+        except Exception:
+            pass
+        session.commit()
 
     def _migrate_v20(self, session: Session) -> None:
         """Rebuild historial_visita so cliente_id is nullable (ON DELETE SET NULL).

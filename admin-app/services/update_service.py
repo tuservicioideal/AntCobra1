@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass
 from typing import Callable
@@ -31,6 +32,7 @@ from config import APP_VERSION, UPDATE_MANIFEST_URL
 ProgressCb = Callable[[str, float], None]
 
 SHORTCUT_NAME = "Recaudo Legal"
+_download_lock = threading.Lock()
 
 
 @dataclass
@@ -340,6 +342,39 @@ def _sha256_file(path: str, chunk_size: int = 1024 * 1024) -> str:
     return h.hexdigest()
 
 
+def _zip_matches_hash(zip_path: str, expected_sha256: str) -> bool:
+    if not expected_sha256 or not os.path.isfile(zip_path):
+        return False
+    try:
+        return _sha256_file(zip_path).lower() == expected_sha256.lower()
+    except OSError:
+        return False
+
+
+def _extract_exe_from_zip(zip_path: str, folder: str, preferred_filename: str) -> tuple[str, str]:
+    """Return (exe_path, error_message). exe_path is empty on failure."""
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            names = [n for n in zf.namelist() if n.lower().endswith(".exe") and not n.endswith("/")]
+            if not names:
+                return "", "El paquete no contiene un ejecutable .exe."
+            member = next((n for n in names if os.path.basename(n) == preferred_filename), names[0])
+            zf.extract(member, folder)
+            exe_path = os.path.join(folder, member)
+            if os.path.dirname(member):
+                flat = os.path.join(folder, os.path.basename(member))
+                if os.path.abspath(exe_path) != os.path.abspath(flat):
+                    if os.path.exists(flat):
+                        os.remove(flat)
+                    os.replace(exe_path, flat)
+                    exe_path = flat
+            return exe_path, ""
+    except zipfile.BadZipFile:
+        return "", "El archivo descargado no es un ZIP válido."
+    except Exception as e:
+        return "", f"No se pudo extraer el ejecutable: {e}"
+
+
 def download_update(
     info: UpdateInfo,
     dest_dir: str | None = None,
@@ -354,82 +389,66 @@ def download_update(
     zip_name = info.package or os.path.basename(info.url) or f"Cobranzas-Setup-{info.version}.zip"
     zip_path = os.path.join(folder, zip_name)
 
-    if progress:
-        progress("Descargando actualización…", 0.05)
+    with _download_lock:
+        return _download_update_locked(info, folder, zip_path, progress)
 
-    try:
-        with requests.get(info.url, stream=True, timeout=120) as resp:
-            resp.raise_for_status()
-            total = int(resp.headers.get("Content-Length") or 0)
-            done = 0
-            with open(zip_path, "wb") as fh:
-                for chunk in resp.iter_content(chunk_size=1024 * 256):
-                    if not chunk:
-                        continue
-                    fh.write(chunk)
-                    done += len(chunk)
-                    if progress and total > 0:
-                        progress(
-                            f"Descargando… {done // (1024 * 1024)} / {total // (1024 * 1024)} MB",
-                            min(0.85, done / total),
-                        )
-    except requests.exceptions.ConnectionError:
-        return DownloadResult(success=False, message="Sin conexión a Internet.")
-    except requests.exceptions.Timeout:
-        return DownloadResult(success=False, message="Tiempo de espera agotado al descargar.")
-    except Exception as e:
-        return DownloadResult(success=False, message=f"Error al descargar: {e}")
 
-    if progress:
-        progress("Verificando archivo…", 0.9)
+def _download_update_locked(
+    info: UpdateInfo,
+    folder: str,
+    zip_path: str,
+    progress: ProgressCb | None,
+) -> DownloadResult:
+    reuse_existing = _zip_matches_hash(zip_path, info.sha256)
+    if reuse_existing:
+        if progress:
+            progress("Paquete ya descargado, verificando…", 0.85)
+    else:
+        if progress:
+            progress("Descargando actualización…", 0.05)
+        try:
+            with requests.get(info.url, stream=True, timeout=120) as resp:
+                resp.raise_for_status()
+                total = int(resp.headers.get("Content-Length") or 0)
+                done = 0
+                with open(zip_path, "wb") as fh:
+                    for chunk in resp.iter_content(chunk_size=1024 * 256):
+                        if not chunk:
+                            continue
+                        fh.write(chunk)
+                        done += len(chunk)
+                        if progress and total > 0:
+                            progress(
+                                f"Descargando… {done // (1024 * 1024)} / {total // (1024 * 1024)} MB",
+                                min(0.85, done / total),
+                            )
+        except requests.exceptions.ConnectionError:
+            return DownloadResult(success=False, message="Sin conexión a Internet.")
+        except requests.exceptions.Timeout:
+            return DownloadResult(success=False, message="Tiempo de espera agotado al descargar.")
+        except Exception as e:
+            return DownloadResult(success=False, message=f"Error al descargar: {e}")
 
-    if info.sha256:
-        digest = _sha256_file(zip_path)
-        if digest.lower() != info.sha256.lower():
-            try:
-                os.remove(zip_path)
-            except OSError:
-                pass
-            return DownloadResult(
-                success=False,
-                message="El archivo descargado no coincide con el hash esperado (corrupto).",
-            )
+        if progress:
+            progress("Verificando archivo…", 0.9)
 
-    exe_path = ""
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            names = [n for n in zf.namelist() if n.lower().endswith(".exe") and not n.endswith("/")]
-            if not names:
+        if info.sha256:
+            digest = _sha256_file(zip_path)
+            if digest.lower() != info.sha256.lower():
+                try:
+                    os.remove(zip_path)
+                except OSError:
+                    pass
                 return DownloadResult(
                     success=False,
-                    message="El paquete no contiene un ejecutable .exe.",
-                    zip_path=zip_path,
-                    folder=folder,
+                    message="El archivo descargado no coincide con el hash esperado (corrupto).",
                 )
-            # Prefer the declared filename when present
-            preferred = info.filename
-            member = next((n for n in names if os.path.basename(n) == preferred), names[0])
-            zf.extract(member, folder)
-            exe_path = os.path.join(folder, member)
-            # Flatten nested paths if any
-            if os.path.dirname(member):
-                flat = os.path.join(folder, os.path.basename(member))
-                if os.path.abspath(exe_path) != os.path.abspath(flat):
-                    if os.path.exists(flat):
-                        os.remove(flat)
-                    os.replace(exe_path, flat)
-                    exe_path = flat
-    except zipfile.BadZipFile:
+
+    exe_path, extract_error = _extract_exe_from_zip(zip_path, folder, info.filename)
+    if not exe_path:
         return DownloadResult(
             success=False,
-            message="El archivo descargado no es un ZIP válido.",
-            zip_path=zip_path,
-            folder=folder,
-        )
-    except Exception as e:
-        return DownloadResult(
-            success=False,
-            message=f"No se pudo extraer el ejecutable: {e}",
+            message=extract_error or "No se pudo extraer el ejecutable.",
             zip_path=zip_path,
             folder=folder,
         )

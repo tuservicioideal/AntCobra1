@@ -100,6 +100,7 @@ class StatsPage:
             "total": 0, "pendiente": 0, "visitado_habido": 0,
             "visitado_no_habido": 0, "fallecido_inubicable": 0,
             "suplantacion": 0, "pago_no_registrado": 0,
+            "no_hizo_pedido": 0, "completo_pedido_socia": 0,
             "deuda_total": 0.0, "deuda_visitada": 0.0,
         }
         if not self.app.active_campaign:
@@ -277,6 +278,8 @@ class StatsPage:
             (res["fallecido_inubicable"], "#EF4444", "Inubicable"),
             (res.get("suplantacion", 0), "#E11D48", "Suplantación"),
             (res.get("pago_no_registrado", 0), "#3B82F6", "Pago No Reg."),
+            (res.get("no_hizo_pedido", 0), "#EA580C", "No hizo pedido"),
+            (res.get("completo_pedido_socia", 0), "#0D9488", "Pedido socia"),
         ]
         total_pie = sum(s[0] for s in slices) or 1
         start = -90

@@ -9,12 +9,14 @@ class MapClientMarker extends StatelessWidget {
     required this.client,
     required this.onRoute,
     required this.focused,
+    this.isCandidate = false,
     this.onTap,
   });
 
   final ClientModel client;
   final bool onRoute;
   final bool focused;
+  final bool isCandidate;
   final VoidCallback? onTap;
 
   static const double hitSize = 48;
@@ -22,8 +24,9 @@ class MapClientMarker extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final iconSize = onRoute ? 34.0 : 30.0;
-    final iconColor =
-        onRoute ? Colors.green.shade700 : AppTheme.primaryColor;
+    final iconColor = onRoute
+        ? Colors.green.shade700
+        : (isCandidate ? Colors.orange.shade700 : AppTheme.primaryColor);
 
     final visual = SizedBox(
       width: hitSize,

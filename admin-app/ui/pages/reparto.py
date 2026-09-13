@@ -18,6 +18,11 @@ from services.reparto_planner import (
     SIN_GESTOR_CAMPO,
     OVERRIDE_MANUAL,
     NA_CAMPO,
+    SEGUNDA_CUENTA_CAMPO,
+    PASA_CAMPO_MONTO,
+    QUEDA_CALL_HABIDO,
+    QUEDA_CALL_BAJO_MONTO,
+    CAMBIO_SLOT_ETAPA,
 )
 from services.call_center_service import filter_call_gestores
 from ..theme import *
@@ -35,6 +40,11 @@ _AFINIDAD_LABELS = {
     SIN_GESTOR_CAMPO: "Sin gestor campo",
     OVERRIDE_MANUAL: "Override manual",
     NA_CAMPO: "Solo campo",
+    SEGUNDA_CUENTA_CAMPO: "2ª cuenta → campo",
+    PASA_CAMPO_MONTO: "Pasa campo (>40)",
+    QUEDA_CALL_HABIDO: "Call (habido)",
+    QUEDA_CALL_BAJO_MONTO: "Call (≤40)",
+    CAMBIO_SLOT_ETAPA: "Cambio slot etapa",
 }
 
 
@@ -114,14 +124,16 @@ class RepartoPlanView:
         nuevos = sum(1 for c in plan.clientes if c.estado_afinidad == NUEVO)
         reasig = sum(1 for c in plan.clientes if c.estado_afinidad == REASIGNADO_HUERFANO)
         mantiene = sum(1 for c in plan.clientes if c.estado_afinidad == MANTIENE)
+        arrastre = sum(1 for c in plan.clientes if c.estado_afinidad == SEGUNDA_CUENTA_CAMPO)
+        pf = plan.preview_fases or {}
 
         kpis = [
             ("total", "Clientes", str(plan.total_clientes), TEXT_PRIMARY),
             ("mantiene", "% Mantiene", f"{plan.pct_mantiene}%", SUCCESS),
             ("nuevos", "Nuevos call", str(nuevos), ACCENT),
-            ("reasig", "Reasignados", str(reasig), WARNING),
-            ("sin_gestor", "Sin gestor", str(len(plan.sin_gestor_campo)), DANGER),
-            ("conflictos", "Conflictos", str(len(plan.conflictos_campo)), DANGER),
+            ("arrastre", "2ª cta campo", str(arrastre), WARNING),
+            ("call_fase", "→ Call", str(pf.get("call", "—")), INFO),
+            ("campo_fase", "→ Campo", str(pf.get("campo", "—")), SUCCESS),
         ]
         for i, (key, label, value, color) in enumerate(kpis):
             card = ctk.CTkFrame(
@@ -280,8 +292,8 @@ class RepartoPlanView:
         vals = self._tree.item(sel[0], "values")
         codigo = vals[0]
         row = next((c for c in self._filtered if c.codigo_cliente == codigo), None)
-        if not row or row.fase_gestion != "call" or row.tramo_actual != 1:
-            messagebox.showinfo("Reparto", "Solo se puede reasignar clientes en call tramo 1.")
+        if not row or row.fase_gestion != "call":
+            messagebox.showinfo("Reparto", "Solo se puede reasignar clientes en fase call.")
             return
         names = [
             f"{g.get('nombre', g.get('uid'))} ({g.get('uid') or g.get('id')})"

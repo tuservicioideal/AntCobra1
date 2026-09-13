@@ -18,6 +18,8 @@ _STATUS_LABELS = {
     "fallecido_inubicable": ("Inubicable", DANGER),
     "suplantacion": ("Suplantación", "#E11D48"),
     "pago_no_registrado": ("Pago No Reg.", INFO),
+    "no_hizo_pedido": ("No hizo pedido", "#EA580C"),
+    "completo_pedido_socia": ("Pedido socia", "#0D9488"),
 }
 
 _TREE_BATCH = 100
@@ -273,6 +275,7 @@ class MonitorPage:
             return {"resumen": {"total": 0, "pendiente": 0, "visitado_habido": 0,
                                 "visitado_no_habido": 0, "fallecido_inubicable": 0,
                                 "suplantacion": 0, "pago_no_registrado": 0,
+                                "no_hizo_pedido": 0, "completo_pedido_socia": 0,
                                 "deuda_total": 0, "deuda_visitada": 0}, "secciones": {}}
         clients = self.app.campaign_mgr.get_all_clients(self.app.active_campaign.id)
         clients = apply_campana_banco_filter(clients, campana_banco)
@@ -285,6 +288,8 @@ class MonitorPage:
             "fallecido_inubicable": 0,
             "suplantacion": 0,
             "pago_no_registrado": 0,
+            "no_hizo_pedido": 0,
+            "completo_pedido_socia": 0,
             "deuda_total": 0.0,
             "deuda_visitada": 0.0,
         }

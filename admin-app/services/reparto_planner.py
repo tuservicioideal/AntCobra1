@@ -1,7 +1,9 @@
 """
 Plan de reparto con preservación de afinidad cliente-asesor (campo + call).
 
-Construye un RepartoPlan sin persistir, reutilizando LPT de call_center_service.
+Construye un RepartoPlan sin persistir, usando:
+  - Matriz de fase call/campo (fase_reparto)
+  - LPT por pool de etapa (call_codigo E1-1 … E3-1)
 """
 
 from __future__ import annotations
@@ -11,17 +13,31 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from .database import Cliente, TramoEnum, FASE_GESTION_CALL
+from .database import Cliente, FASE_GESTION_CALL, FASE_GESTION_CAMPO
 from .excel_parser import make_seccion_key
 from .call_center_service import (
     GestorCallBalance,
     filter_call_gestores,
     is_call_gestor_active,
-    run_affinity_lpt,
+    run_bucketed_call_assignment,
     get_territorial_seccion_key,
+    classify_call_slot_pool,
     _cliente_display_name,
+    _gestor_uid,
+    _gestor_call_codigo,
 )
-from .tramo_engine import UMBRAL_MINIMO_GESTION, load_config
+from .fase_reparto import (
+    evaluate_fases_batch,
+    is_call_eligible_for_lpt,
+    resolve_campo_seccion_for_decision,
+    MOTIVO_SEGUNDA_CUENTA_CAMPO,
+    MOTIVO_PASA_CAMPO_MONTO,
+    MOTIVO_QUEDA_CALL_HABIDO,
+    MOTIVO_QUEDA_CALL_BAJO_MONTO,
+    MOTIVO_CAMBIO_SLOT_ETAPA,
+    MOTIVO_ETAPA1_CALL,
+    MOTIVO_YA_EN_CAMPO,
+)
 
 # Estados de afinidad
 MANTIENE = "MANTIENE"
@@ -30,7 +46,12 @@ REASIGNADO_HUERFANO = "REASIGNADO_HUERFANO"
 AFINIDAD_ROTA_CAMPO = "AFINIDAD_ROTA_CAMPO"
 SIN_GESTOR_CAMPO = "SIN_GESTOR_CAMPO"
 OVERRIDE_MANUAL = "OVERRIDE_MANUAL"
-NA_CAMPO = "NA_CAMPO"  # cliente en fase campo (tramo > 1)
+NA_CAMPO = "NA_CAMPO"
+SEGUNDA_CUENTA_CAMPO = MOTIVO_SEGUNDA_CUENTA_CAMPO
+PASA_CAMPO_MONTO = MOTIVO_PASA_CAMPO_MONTO
+QUEDA_CALL_HABIDO = MOTIVO_QUEDA_CALL_HABIDO
+QUEDA_CALL_BAJO_MONTO = MOTIVO_QUEDA_CALL_BAJO_MONTO
+CAMBIO_SLOT_ETAPA = MOTIVO_CAMBIO_SLOT_ETAPA
 
 
 @dataclass
@@ -46,6 +67,7 @@ class ClienteReparto:
     estado_afinidad: str
     importe: float
     tramo_actual: int = 1
+    motivo_fase: str = ""
 
 
 @dataclass
@@ -58,6 +80,7 @@ class RepartoPlan:
     conflictos_campo: list[str] = field(default_factory=list)
     overrides: dict[str, str] = field(default_factory=dict)
     errores: list[str] = field(default_factory=list)
+    preview_fases: dict[str, int] = field(default_factory=dict)
 
     @property
     def total_clientes(self) -> int:
@@ -89,12 +112,19 @@ def _resolve_campo_gestor(
 
 
 def _is_call_eligible(cliente: Cliente) -> bool:
-    load_config()
-    return (
-        cliente.tramo_actual == TramoEnum.TRAMO_1.value
-        and cliente.fase_gestion == FASE_GESTION_CALL
-        and float(cliente.importe_deuda_pendiente or 0) >= UMBRAL_MINIMO_GESTION
-    )
+    return is_call_eligible_for_lpt(cliente)
+
+
+def _gestor_matches_pool(gestor: dict | None, pool: tuple[str, ...]) -> bool:
+    if not gestor:
+        return False
+    code = _gestor_call_codigo(gestor)
+    # Legacy: sin call_codigo, cualquier gestor call activo es válido en el pool
+    if not code:
+        return True
+    if not pool:
+        return False
+    return code in pool
 
 
 def build_reparto_plan(
@@ -104,6 +134,7 @@ def build_reparto_plan(
     *,
     overrides: dict[str, str] | None = None,
     seccion_keys_anteriores: dict[str, str] | None = None,
+    allow_return_to_call: bool = False,
 ) -> RepartoPlan:
     """
     Construye el plan de reparto sin persistir.
@@ -111,6 +142,8 @@ def build_reparto_plan(
     Args:
         seccion_keys_anteriores: snapshot codigo_cliente -> seccion_key antes de
             aplicar Excel (para detectar AFINIDAD_ROTA_CAMPO).
+        allow_return_to_call: si True, preview de migración puede devolver a call
+            cuentas que nunca debieron estar en campo (saldo ≤ 40 sin ancla).
     """
     from .campaign_manager import campaign_manager
 
@@ -142,6 +175,23 @@ def build_reparto_plan(
         .all()
     )
 
+    fase_batch = evaluate_fases_batch(
+        clientes_activos,
+        assignment_index=assignment_index,
+        allow_return_to_call=allow_return_to_call,
+    )
+    fase_by_codigo = {
+        d.codigo_cliente: d for d in fase_batch.decisiones
+    }
+    plan.preview_fases = {
+        "call": sum(1 for d in fase_batch.decisiones if d.fase == FASE_GESTION_CALL),
+        "campo": sum(1 for d in fase_batch.decisiones if d.fase == FASE_GESTION_CAMPO),
+        "arrastre_dni": sum(1 for d in fase_batch.decisiones if d.arrastre_dni),
+        "pasa_campo_monto": sum(
+            1 for d in fase_batch.decisiones if d.motivo == MOTIVO_PASA_CAMPO_MONTO
+        ),
+    }
+
     fixed_assignments: dict[str, tuple[str, str, float]] = {}
     pending_call: list[Cliente] = []
     cliente_rows: list[ClienteReparto] = []
@@ -150,17 +200,34 @@ def build_reparto_plan(
         (g.get("uid") or g.get("id", "")): g.get("nombre", g.get("email", ""))
         for g in gestores_call
     }
+    gestores_by_uid = {
+        _gestor_uid(g): g for g in gestores_call if _gestor_uid(g)
+    }
 
     for cliente in clientes_activos:
         codigo = cliente.codigo_cliente or str(cliente.id)
-        seccion_key = get_territorial_seccion_key(cliente)
-        gestor_uid, gestor_nombre, campo_status = _resolve_campo_gestor(
-            seccion_key, assignment_index,
+        dec = fase_by_codigo.get(codigo)
+        fase_objetivo = (
+            dec.fase if dec else (cliente.fase_gestion or FASE_GESTION_CAMPO)
         )
+        motivo_fase = dec.motivo if dec else ""
+
+        seccion_key = get_territorial_seccion_key(cliente)
+        if dec and dec.fase == FASE_GESTION_CAMPO:
+            seccion_destino = resolve_campo_seccion_for_decision(dec) or seccion_key
+        else:
+            seccion_destino = seccion_key
+
+        gestor_uid, gestor_nombre, campo_status = _resolve_campo_gestor(
+            seccion_destino, assignment_index,
+        )
+        if dec and dec.gestor_ancla_uid and not dec.gestor_ancla_uid.startswith("_sec:"):
+            gestor_uid = dec.gestor_ancla_uid
+            gestor_nombre = dec.gestor_ancla_nombre or gestor_nombre
 
         estado_campo = ""
         if campo_status == "missing":
-            sin_gestor.add(seccion_key)
+            sin_gestor.add(seccion_destino)
             estado_campo = SIN_GESTOR_CAMPO
         elif campo_status == "conflict":
             estado_campo = SIN_GESTOR_CAMPO
@@ -168,27 +235,50 @@ def build_reparto_plan(
         prev_sk = prev_sections.get(codigo, "")
         section_changed = bool(prev_sk and prev_sk != seccion_key)
 
-        if section_changed:
+        # Badges de fase especiales
+        if motivo_fase == MOTIVO_SEGUNDA_CUENTA_CAMPO:
+            estado_afinidad = SEGUNDA_CUENTA_CAMPO
+        elif motivo_fase == MOTIVO_PASA_CAMPO_MONTO and fase_objetivo == FASE_GESTION_CAMPO:
+            estado_afinidad = PASA_CAMPO_MONTO
+        elif section_changed:
             estado_afinidad = AFINIDAD_ROTA_CAMPO
         elif estado_campo == SIN_GESTOR_CAMPO:
             estado_afinidad = SIN_GESTOR_CAMPO
-        elif not _is_call_eligible(cliente):
+        elif fase_objetivo != FASE_GESTION_CALL:
             estado_afinidad = estado_campo or NA_CAMPO
         else:
+            # Call: afinidad + pool de etapa
             uid_prev = (cliente.call_gestor_uid or "").strip()
+            pool = classify_call_slot_pool(cliente) if dec is None else (dec.call_pool or ())
+            if not pool:
+                pool = classify_call_slot_pool(cliente)
+            g_prev = gestores_by_uid.get(uid_prev) if uid_prev else None
+            in_pool = _gestor_matches_pool(g_prev, pool) if pool else (
+                is_call_gestor_active(uid_prev, gestores_call) if uid_prev else False
+            )
+
             if codigo in plan.overrides:
                 estado_afinidad = OVERRIDE_MANUAL
-            elif uid_prev and is_call_gestor_active(uid_prev, gestores_call):
+            elif uid_prev and in_pool:
                 estado_afinidad = MANTIENE
+            elif uid_prev and is_call_gestor_active(uid_prev, gestores_call) and not in_pool:
+                estado_afinidad = CAMBIO_SLOT_ETAPA
             elif uid_prev:
                 estado_afinidad = REASIGNADO_HUERFANO
+            elif motivo_fase == MOTIVO_QUEDA_CALL_HABIDO:
+                estado_afinidad = QUEDA_CALL_HABIDO
+            elif motivo_fase == MOTIVO_QUEDA_CALL_BAJO_MONTO:
+                estado_afinidad = QUEDA_CALL_BAJO_MONTO
             else:
                 estado_afinidad = NUEVO
 
         call_uid = ""
         call_nombre = ""
 
-        if _is_call_eligible(cliente):
+        if fase_objetivo == FASE_GESTION_CALL and is_call_eligible_for_lpt(
+            # Usar tramo/fase objetivo en un proxy ligero
+            _ClienteProxy(cliente, fase_objetivo)
+        ):
             if codigo in plan.overrides:
                 call_uid = plan.overrides[codigo]
                 call_nombre = gestor_call_names.get(call_uid, call_uid)
@@ -197,7 +287,10 @@ def build_reparto_plan(
                 call_nombre = cliente.call_gestor_nombre or ""
                 monto = float(cliente.importe_deuda_pendiente or 0)
                 fixed_assignments[codigo] = (call_uid, call_nombre, monto)
-            elif estado_afinidad in (NUEVO, REASIGNADO_HUERFANO):
+            elif estado_afinidad in (
+                NUEVO, REASIGNADO_HUERFANO, CAMBIO_SLOT_ETAPA,
+                QUEDA_CALL_HABIDO, QUEDA_CALL_BAJO_MONTO, MOTIVO_ETAPA1_CALL,
+            ):
                 pending_call.append(cliente)
             elif estado_afinidad == OVERRIDE_MANUAL:
                 call_uid = plan.overrides[codigo]
@@ -206,27 +299,31 @@ def build_reparto_plan(
         cliente_rows.append(ClienteReparto(
             codigo_cliente=codigo,
             nombre=_cliente_display_name(cliente),
-            seccion_key=seccion_key,
+            seccion_key=seccion_destino,
             gestor_campo_uid=gestor_uid,
             gestor_campo_nombre=gestor_nombre,
-            fase_gestion=cliente.fase_gestion or "",
+            fase_gestion=fase_objetivo,
             call_gestor_uid=call_uid,
             call_gestor_nombre=call_nombre,
             estado_afinidad=estado_afinidad if estado_afinidad else (estado_campo or NA_CAMPO),
             importe=float(cliente.importe_deuda_pendiente or 0),
             tramo_actual=int(cliente.tramo_actual or 1),
+            motivo_fase=motivo_fase,
         ))
 
     plan.sin_gestor_campo = sorted(sin_gestor)
 
     if pending_call and gestores_call:
-        lpt_map = run_affinity_lpt(gestores_call, fixed_assignments, pending_call)
+        # Ajustar tramo en proxy no es necesario: classify usa cliente.tramo_actual
+        assign_map = run_bucketed_call_assignment(
+            gestores_call, fixed_assignments, pending_call,
+        )
         row_by_codigo = {r.codigo_cliente: r for r in cliente_rows}
         for cliente in pending_call:
             codigo = cliente.codigo_cliente or str(cliente.id)
-            if codigo not in lpt_map:
+            if codigo not in assign_map:
                 continue
-            uid, nombre = lpt_map[codigo]
+            uid, nombre, _razon = assign_map[codigo]
             row = row_by_codigo.get(codigo)
             if row:
                 row.call_gestor_uid = uid
@@ -238,9 +335,25 @@ def build_reparto_plan(
     return plan
 
 
+class _ClienteProxy:
+    """Proxy mínimo para is_call_eligible_for_lpt con fase objetivo."""
+
+    def __init__(self, cliente: Cliente, fase: str):
+        self._c = cliente
+        self.fase_gestion = fase
+        self.activo_en_cartera = getattr(cliente, "activo_en_cartera", True)
+        self.tramo_actual = getattr(cliente, "tramo_actual", 1)
+        self.importe_deuda_pendiente = getattr(cliente, "importe_deuda_pendiente", 0)
+
+    def __getattr__(self, name: str):
+        return getattr(self._c, name)
+
+
 def _build_resumen_campo(clientes: list[ClienteReparto]) -> dict[str, dict[str, Any]]:
     resumen: dict[str, dict[str, Any]] = {}
     for c in clientes:
+        if c.fase_gestion != FASE_GESTION_CAMPO:
+            continue
         key = c.gestor_campo_uid or "_sin_gestor"
         if key not in resumen:
             resumen[key] = {
@@ -271,13 +384,13 @@ def _build_resumen_call(
     balances: dict[str, GestorCallBalance] = {}
     for g in gestores_call:
         uid = g.get("uid") or g.get("id", "")
-        balances[uid] = GestorCallBalance(
-            uid=uid,
-            nombre=g.get("nombre", g.get("email", uid)),
-        )
+        code = _gestor_call_codigo(g)
+        nombre = g.get("nombre", g.get("email", uid))
+        label = f"{nombre} ({code})" if code else nombre
+        balances[uid] = GestorCallBalance(uid=uid, nombre=label)
 
     for c in clientes:
-        if c.fase_gestion != FASE_GESTION_CALL or c.tramo_actual != 1:
+        if c.fase_gestion != FASE_GESTION_CALL:
             continue
         uid = c.call_gestor_uid
         if not uid:
@@ -289,10 +402,10 @@ def _build_resumen_call(
         b = balances[uid]
         b.num_cuentas += 1
         b.monto_total += c.importe
-        if c.estado_afinidad == NUEVO:
-            b.nuevas_asignadas += 1
-            b.monto_nuevo += c.importe
-        elif c.estado_afinidad in (REASIGNADO_HUERFANO, OVERRIDE_MANUAL):
+        if c.estado_afinidad in (
+            NUEVO, REASIGNADO_HUERFANO, OVERRIDE_MANUAL, CAMBIO_SLOT_ETAPA,
+            QUEDA_CALL_HABIDO, QUEDA_CALL_BAJO_MONTO,
+        ):
             b.nuevas_asignadas += 1
             b.monto_nuevo += c.importe
 

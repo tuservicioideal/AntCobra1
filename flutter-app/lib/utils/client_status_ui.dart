@@ -13,6 +13,10 @@ String clientStatusLabel(String estado) {
       return 'Suplantación';
     case 'pago_no_registrado':
       return 'Pago No Registrado';
+    case 'no_hizo_pedido':
+      return 'No hizo pedido';
+    case 'completo_pedido_socia':
+      return 'Completó el pedido la socia';
     case 'devolucion_pendiente':
       return 'Devolución pendiente';
     case 'pendiente':

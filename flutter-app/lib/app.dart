@@ -144,11 +144,14 @@ class _ProfileLoadingScreen extends StatelessWidget {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const CircularProgressIndicator(color: AppTheme.primaryColor),
+              if (auth.error == null)
+                const CircularProgressIndicator(color: AppTheme.primaryColor)
+              else
+                const Icon(Icons.error_outline, size: 40, color: AppTheme.danger),
               const SizedBox(height: 20),
-              const Text(
-                'Cargando perfil...',
-                style: TextStyle(
+              Text(
+                auth.error == null ? 'Cargando perfil...' : 'No se pudo entrar',
+                style: const TextStyle(
                   fontSize: 16,
                   fontWeight: FontWeight.w600,
                   color: AppTheme.textPrimary,
@@ -160,6 +163,14 @@ class _ProfileLoadingScreen extends StatelessWidget {
                   auth.error!,
                   textAlign: TextAlign.center,
                   style: const TextStyle(color: AppTheme.danger, fontSize: 13),
+                ),
+                const SizedBox(height: 16),
+                FilledButton(
+                  onPressed: () {
+                    auth.clearError();
+                    auth.refreshProfile();
+                  },
+                  child: const Text('Reintentar'),
                 ),
               ],
             ],

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -23,33 +25,27 @@ class ClientDetailDoxeoSection extends StatefulWidget {
 
 class _ClientDetailDoxeoSectionState extends State<ClientDetailDoxeoSection> {
   final _queue = DoxeoQueueService();
+  final _persistedJobIds = <String>{};
 
   String _selectedComandoId = '';
   String? _activeJobId;
   bool _launching = false;
 
-  String get _dni => widget.client.numeroDocumento.trim();
+  String get _dni => normalizarDocumento(widget.client.numeroDocumento);
   String get _clienteId =>
       widget.client.id.isNotEmpty ? widget.client.id : widget.client.codigoCliente;
 
-  Future<void> _launch(List<DoxeoComando> comandos) async {
+  Future<void> _launch([List<DoxeoComando>? comandos]) async {
     final profile = context.read<AuthService>().profile;
     if (profile == null) return;
-    DoxeoComando? comando;
-    for (final c in comandos) {
-      if (c.id == _selectedComandoId) comando = c;
+    final lista = comandos ?? await _queue.streamComandos().first;
+    final comando = resolverComando(lista, _selectedComandoId);
+    if (comando == null) {
+      _showSnack('No hay comandos disponibles para consultar.', isError: true);
+      return;
     }
     setState(() => _launching = true);
     try {
-      final yaActiva = await _queue.tieneConsultaActiva(
-        uid: profile.uid,
-        clienteId: _clienteId,
-      );
-      if (yaActiva) {
-        _showSnack('Ya tienes una consulta en curso para este cliente.',
-            isError: true);
-        return;
-      }
       final jobId = await _queue.crearConsulta(
         cliente: widget.client,
         solicitante: profile,
@@ -57,11 +53,19 @@ class _ClientDetailDoxeoSectionState extends State<ClientDetailDoxeoSection> {
       );
       if (!mounted) return;
       setState(() => _activeJobId = jobId);
+    } on DoxeoQuotaException catch (e) {
+      _showSnack(e.message, isError: true);
     } catch (e) {
       _showSnack('No se pudo encolar la consulta: $e', isError: true);
     } finally {
       if (mounted) setState(() => _launching = false);
     }
+  }
+
+  void _persistIfDone(DoxeoJob job) {
+    if (!debePersistirConsulta(job.estado)) return;
+    if (!_persistedJobIds.add(job.id)) return;
+    unawaited(_queue.guardarConsultaCliente(cliente: widget.client, job: job));
   }
 
   void _showSnack(String msg, {bool isError = false}) {
@@ -102,6 +106,8 @@ class _ClientDetailDoxeoSectionState extends State<ClientDetailDoxeoSection> {
               ],
             ),
             const SizedBox(height: 10),
+            _buildConsultasGuardadas(),
+            const SizedBox(height: 10),
             if (_dni.isEmpty)
               Text(
                 'Este cliente no tiene DNI registrado; no se puede consultar.',
@@ -112,8 +118,6 @@ class _ClientDetailDoxeoSectionState extends State<ClientDetailDoxeoSection> {
               const SizedBox(height: 10),
               _buildActiveJob(),
             ],
-            const SizedBox(height: 6),
-            _buildHistorial(),
           ],
         ),
       ),
@@ -125,14 +129,9 @@ class _ClientDetailDoxeoSectionState extends State<ClientDetailDoxeoSection> {
       stream: _queue.streamComandos(),
       builder: (context, snap) {
         final comandos = snap.data ?? const <DoxeoComando>[];
-        DoxeoComando? seleccionado;
-        for (final c in comandos) {
-          if (c.id == _selectedComandoId) {
-            seleccionado = c;
-            break;
-          }
-        }
-        final preview = seleccionado?.previewMessage(_dni) ?? _dni;
+        final seleccionado = resolverComando(comandos, _selectedComandoId);
+        final preview =
+            seleccionado == null ? '' : seleccionado.previewMessage(_dni);
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -140,16 +139,10 @@ class _ClientDetailDoxeoSectionState extends State<ClientDetailDoxeoSection> {
               spacing: 6,
               runSpacing: 6,
               children: [
-                ChoiceChip(
-                  label: const Text('Solo DNI', style: TextStyle(fontSize: 11)),
-                  selected: _selectedComandoId.isEmpty,
-                  onSelected: (_) =>
-                      setState(() => _selectedComandoId = ''),
-                ),
                 ...comandos.map(
                   (c) => ChoiceChip(
                     label: Text(c.nombre, style: const TextStyle(fontSize: 11)),
-                    selected: _selectedComandoId == c.id,
+                    selected: seleccionado?.id == c.id,
                     onSelected: (_) =>
                         setState(() => _selectedComandoId = c.id),
                   ),
@@ -164,29 +157,34 @@ class _ClientDetailDoxeoSectionState extends State<ClientDetailDoxeoSection> {
                   style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
                 ),
               ),
-            const SizedBox(height: 8),
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: AppTheme.primaryLight,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text(
-                'Se enviará: $preview',
-                style: const TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: AppTheme.primaryDark,
+            if (preview.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: AppTheme.primaryLight,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Text(
+                  'Se enviará: $preview',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.primaryDark,
+                  ),
                 ),
               ),
-            ),
+            ],
             const SizedBox(height: 10),
             SizedBox(
               width: double.infinity,
               child: FilledButton.icon(
-                onPressed:
-                    _launching || _activeJobId != null ? null : () => _launch(comandos),
+                onPressed: _launching ||
+                        _activeJobId != null ||
+                        seleccionado == null
+                    ? null
+                    : () => _launch(comandos),
                 icon: _launching
                     ? const SizedBox(
                         width: 16,
@@ -217,12 +215,19 @@ class _ClientDetailDoxeoSectionState extends State<ClientDetailDoxeoSection> {
             child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
           );
         }
+        _persistIfDone(job);
         return DoxeoJobView(
           job: job,
           queue: _queue,
           onCancel: job.isPending
               ? () async {
                   await _queue.cancelarJob(job.id);
+                }
+              : null,
+          onRetry: job.canRetry
+              ? () {
+                  setState(() => _activeJobId = null);
+                  _launch();
                 }
               : null,
           onClose: job.isDone
@@ -233,27 +238,79 @@ class _ClientDetailDoxeoSectionState extends State<ClientDetailDoxeoSection> {
     );
   }
 
-  Widget _buildHistorial() {
-    if (_clienteId.isEmpty) return const SizedBox.shrink();
+  Widget _buildConsultasGuardadas() {
+    final campaignId = widget.client.campaignId;
+    final seccionKey = widget.client.seccionKey;
+    if (_clienteId.isEmpty || campaignId.isEmpty || seccionKey.isEmpty) {
+      return DoxeoConsultasGuardadas(
+        consultas: parseDoxeoConsultas(widget.client.doxeoConsultasRaw),
+        queue: _queue,
+        hideJobId: _activeJobId,
+      );
+    }
     return StreamBuilder<List<DoxeoJob>>(
-      stream: _queue.streamHistorialCliente(_clienteId),
+      stream: _queue.streamConsultasCliente(
+        campaignId: campaignId,
+        seccionKey: seccionKey,
+        clienteId: _clienteId,
+      ),
       builder: (context, snap) {
-        final jobs = (snap.data ?? const <DoxeoJob>[])
-            .where((j) => j.id != _activeJobId)
-            .toList();
-        if (jobs.isEmpty) return const SizedBox.shrink();
-        return ExpansionTile(
-          tilePadding: EdgeInsets.zero,
-          childrenPadding: EdgeInsets.zero,
-          title: Text(
-            'Historial de consultas (${jobs.length})',
-            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-          ),
-          children: jobs
-              .map((job) => _HistorialTile(job: job, queue: _queue))
-              .toList(),
+        final fromDoc = snap.hasError
+            ? const <DoxeoJob>[]
+            : (snap.data ?? const <DoxeoJob>[]);
+        final fromClient = parseDoxeoConsultas(widget.client.doxeoConsultasRaw);
+        final consultas = ultimasConsultasPorTipo([...fromDoc, ...fromClient]);
+        return DoxeoConsultasGuardadas(
+          consultas: consultas,
+          queue: _queue,
+          hideJobId: _activeJobId,
         );
       },
+    );
+  }
+}
+
+class DoxeoConsultasGuardadas extends StatelessWidget {
+  final List<DoxeoJob> consultas;
+  final DoxeoQueueService? queue;
+  final String? hideJobId;
+
+  const DoxeoConsultasGuardadas({
+    super.key,
+    required this.consultas,
+    this.queue,
+    this.hideJobId,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final visible = consultas.where((j) => j.id != hideJobId).toList();
+    if (visible.isEmpty) return const SizedBox.shrink();
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Consultas guardadas',
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w700,
+            color: Colors.grey.shade800,
+          ),
+        ),
+        const SizedBox(height: 2),
+        Text(
+          'Se conserva la última de cada tipo. Una consulta nueva reemplaza la anterior.',
+          style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+        ),
+        const SizedBox(height: 4),
+        ...visible.map(
+          (job) => _HistorialTile(
+            job: job,
+            queue: queue,
+            initiallyExpanded: true,
+          ),
+        ),
+      ],
     );
   }
 }
@@ -312,9 +369,14 @@ class DoxeoWorkersBadge extends StatelessWidget {
 
 class _HistorialTile extends StatelessWidget {
   final DoxeoJob job;
-  final DoxeoQueueService queue;
+  final DoxeoQueueService? queue;
+  final bool initiallyExpanded;
 
-  const _HistorialTile({required this.job, required this.queue});
+  const _HistorialTile({
+    required this.job,
+    this.queue,
+    this.initiallyExpanded = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -327,9 +389,10 @@ class _HistorialTile extends StatelessWidget {
       tilePadding: EdgeInsets.zero,
       childrenPadding: EdgeInsets.zero,
       dense: true,
+      initiallyExpanded: initiallyExpanded,
       leading: DoxeoJobStatusDot(estado: job.estado),
       title: Text(
-        job.comandoNombre.isEmpty ? 'Solo DNI' : job.comandoNombre,
+        job.comandoNombre.isEmpty ? 'Consulta' : job.comandoNombre,
         style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
       ),
       subtitle: Text(
@@ -384,17 +447,19 @@ class DoxeoJobStatusDot extends StatelessWidget {
 /// Reutilizada por la ficha del cliente y por la pantalla Consultas.
 class DoxeoJobView extends StatelessWidget {
   final DoxeoJob job;
-  final DoxeoQueueService queue;
+  final DoxeoQueueService? queue;
   final VoidCallback? onCancel;
   final VoidCallback? onClose;
+  final VoidCallback? onRetry;
   final bool compact;
 
   const DoxeoJobView({
     super.key,
     required this.job,
-    required this.queue,
+    this.queue,
     this.onCancel,
     this.onClose,
+    this.onRetry,
     this.compact = false,
   });
 
@@ -437,12 +502,16 @@ class DoxeoJobView extends StatelessWidget {
           if (job.estado == 'cancelado')
             const Text('Consulta cancelada.',
                 style: TextStyle(fontSize: 12, color: AppTheme.textMuted)),
-          if (job.estado == 'timeout')
+          if (job.estado == 'timeout') ...[
             _banner(AppTheme.warning,
                 job.errorMsg.isEmpty ? 'El bot no respondió a tiempo.' : job.errorMsg),
-          if (job.estado == 'error')
+            if (onRetry != null) _retryButton(),
+          ],
+          if (job.estado == 'error') ...[
             _banner(AppTheme.danger,
                 job.errorMsg.isEmpty ? 'Error ejecutando la consulta.' : job.errorMsg),
+            if (onRetry != null) _retryButton(),
+          ],
           if (job.estado == 'completado') _buildResult(context),
         ],
       ),
@@ -495,6 +564,17 @@ class DoxeoJobView extends StatelessWidget {
     );
   }
 
+  Widget _retryButton() {
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: TextButton.icon(
+        onPressed: onRetry,
+        icon: const Icon(Icons.refresh, size: 16),
+        label: const Text('Reintentar', style: TextStyle(fontSize: 12)),
+      ),
+    );
+  }
+
   Widget _banner(Color color, String text) {
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -507,7 +587,7 @@ class DoxeoJobView extends StatelessWidget {
   }
 
   Widget _buildResult(BuildContext context) {
-    final tieneDatos = job.hasData;
+    final tieneDatos = job.tieneContenidoUtil;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -562,7 +642,7 @@ class DoxeoJobView extends StatelessWidget {
               style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
             ),
           ),
-        if (job.imagenes.isNotEmpty) ...[
+        if (job.imagenes.isNotEmpty && queue != null) ...[
           const SizedBox(height: 8),
           const Text('Imágenes',
               style: TextStyle(fontSize: 10, color: AppTheme.textMuted)),
@@ -571,8 +651,17 @@ class DoxeoJobView extends StatelessWidget {
             spacing: 8,
             runSpacing: 8,
             children: job.imagenes
-                .map((path) => _StorageImageThumb(path: path, queue: queue))
+                .map((path) => _StorageImageThumb(path: path, queue: queue!))
                 .toList(),
+          ),
+        ],
+        if (job.archivos.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          const Text('Documentos',
+              style: TextStyle(fontSize: 10, color: AppTheme.textMuted)),
+          const SizedBox(height: 4),
+          ...job.archivos.map(
+            (archivo) => _StoragePdfTile(archivo: archivo, queue: queue),
           ),
         ],
         if (job.raw.isNotEmpty && !compact) ...[
@@ -685,6 +774,71 @@ class _StorageImageThumb extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+/// Fila tappable para descargar y abrir un PDF de Storage.
+class _StoragePdfTile extends StatefulWidget {
+  final DoxeoArchivo archivo;
+  final DoxeoQueueService? queue;
+
+  const _StoragePdfTile({required this.archivo, this.queue});
+
+  @override
+  State<_StoragePdfTile> createState() => _StoragePdfTileState();
+}
+
+class _StoragePdfTileState extends State<_StoragePdfTile> {
+  bool _loading = false;
+
+  Future<void> _open() async {
+    final queue = widget.queue;
+    if (queue == null || _loading) return;
+    setState(() => _loading = true);
+    try {
+      await queue.openArchivo(widget.archivo);
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('No se pudo abrir el PDF: $e'),
+          backgroundColor: AppTheme.danger,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final name = widget.archivo.fileName.isNotEmpty
+        ? widget.archivo.fileName
+        : 'documento.pdf';
+    final canOpen = widget.queue != null;
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: _loading
+          ? const SizedBox(
+              width: 24,
+              height: 24,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.picture_as_pdf, color: AppTheme.danger),
+      title: Text(
+        name,
+        style: const TextStyle(fontSize: 13),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Text(
+        canOpen ? 'Toca para descargar y abrir' : 'PDF recibido',
+        style: const TextStyle(fontSize: 11, color: AppTheme.textMuted),
+      ),
+      trailing: canOpen ? const Icon(Icons.open_in_new, size: 18) : null,
+      onTap: canOpen && !_loading ? _open : null,
     );
   }
 }

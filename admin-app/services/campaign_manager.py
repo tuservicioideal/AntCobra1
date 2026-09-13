@@ -521,6 +521,9 @@ class CampaignManager:
                 "secciones": summary.get("secciones", {}),
             }
 
+        # Arrastre DNI + fases orgánicas en lote (tras tener todas las filas)
+        self.apply_fases_reparto(campaign_id)
+
         logger.info(
             "Campaign created: %s with %d clients",
             campaign_id, len(all_clients)
@@ -547,12 +550,10 @@ class CampaignManager:
         dia = max(1, (date.today() - fa).days + 1) if fa else 1
         tramo = TramoEngine.get_tramo_for_day(dia)
         cliente.tramo_actual = tramo.value
-        if tramo == TramoEnum.TRAMO_1:
-            cliente.fase_gestion = FASE_GESTION_CALL
-        else:
-            cliente.fase_gestion = FASE_GESTION_CAMPO
-            cliente.call_gestor_uid = None
-            cliente.call_gestor_nombre = None
+        # Fase call/campo según matriz (etapa + monto + habido).
+        # El arrastre por DNI se aplica en lote tras cargar/actualizar Excel.
+        from .fase_reparto import initial_fase_for_new_cliente
+        initial_fase_for_new_cliente(cliente)
 
     def _dict_to_cliente(self, d: dict, campana_id: str) -> Cliente:
         """Convert a parsed Excel client dict to a Cliente ORM object."""
@@ -803,6 +804,8 @@ class CampaignManager:
 
             session.commit()
 
+        # Recalcular fases (arrastre DNI, monto etapa 2/3) tras update Excel
+        self.apply_fases_reparto(campana_id)
         self.sync_campana_banco_meta(campana_id)
 
     def _update_cliente_from_dict(self, cliente: Cliente, d: dict) -> None:
@@ -897,13 +900,16 @@ class CampaignManager:
                 result.transiciones
                 or result.cartas_pendientes
                 or result.cambios_ciclo
-                or result.pasos_a_campo
             ):
                 self.tramo_engine.apply_transitions(session, result)
                 self.tramo_engine.apply_cycle_changes(session, result)
                 # Do not pre-register due letters here. A pending carta must remain
                 # eligible for the publication workflow until it is actually
                 # published (or explicitly recorded as omitted).
+            elif auto_apply:
+                # Sin cambios de tramo: igual recalcular fases (saldo, DNI, etc.)
+                self.tramo_engine._apply_fase_reparto_after_transitions(session, result)
+                session.commit()
 
             if auto_apply and result.pasos_a_campo and firebase_service:
                 self.sync_call_to_campo_firestore(
@@ -917,6 +923,111 @@ class CampaignManager:
         logger.info("Tramo evaluation complete:\n%s", result.resumen)
         return result
 
+    def apply_fases_reparto(
+        self,
+        campana_id: str,
+        *,
+        gestores_firestore: list | None = None,
+        allow_return_to_call: bool = False,
+    ) -> dict:
+        """
+        Recalcula fase call/campo (matriz + arrastre DNI) para toda la campaña.
+
+        Returns:
+            dict con pasos_a_campo, cambios, errores.
+        """
+        with self.db.session() as session:
+            return self._apply_fases_in_session(
+                session,
+                campana_id,
+                gestores_firestore=gestores_firestore,
+                allow_return_to_call=allow_return_to_call,
+                commit=True,
+            )
+
+    def _apply_fases_in_session(
+        self,
+        session,
+        campana_id: str,
+        *,
+        gestores_firestore: list | None = None,
+        allow_return_to_call: bool = False,
+        commit: bool = False,
+    ) -> dict:
+        from .fase_reparto import (
+            evaluate_fases_batch,
+            apply_fase_decision_to_cliente,
+            resolve_campo_seccion_for_decision,
+            MOTIVO_SEGUNDA_CUENTA_CAMPO,
+            MOTIVO_PASA_CAMPO_MONTO,
+        )
+        from .tramo_engine import CallToCampoTransition, UMBRAL_CARTA_FISICA
+
+        clientes = (
+            session.query(Cliente)
+            .filter(
+                Cliente.campana_id == campana_id,
+                Cliente.activo_en_cartera.is_(True),
+            )
+            .all()
+        )
+        assignment_index = None
+        if gestores_firestore is not None:
+            assignment_index = self._build_section_assignment_index(
+                gestores_firestore
+            )
+        batch = evaluate_fases_batch(
+            clientes,
+            assignment_index=assignment_index,
+            allow_return_to_call=allow_return_to_call,
+        )
+        by_codigo = {
+            (c.codigo_cliente or str(c.id)): c for c in clientes
+        }
+        pasos: list = []
+        cambios = 0
+        for dec in batch.decisiones:
+            cliente = by_codigo.get(dec.codigo_cliente)
+            if cliente is None:
+                continue
+            fase_prev = getattr(cliente, "fase_gestion", "") or ""
+            uid_anterior = cliente.call_gestor_uid or ""
+            seccion_call = (
+                make_call_section_key(uid_anterior) if uid_anterior else ""
+            )
+            if apply_fase_decision_to_cliente(cliente, dec):
+                cambios += 1
+            if fase_prev == FASE_GESTION_CALL and dec.fase == FASE_GESTION_CAMPO:
+                seccion_dest = resolve_campo_seccion_for_decision(dec)
+                motivo_txt = {
+                    MOTIVO_PASA_CAMPO_MONTO: (
+                        f"Pase automático call→campo: saldo "
+                        f"S/ {cliente.importe_deuda_pendiente:.2f} > "
+                        f"S/ {UMBRAL_CARTA_FISICA} sin habido"
+                    ),
+                    MOTIVO_SEGUNDA_CUENTA_CAMPO: (
+                        "Segunda cuenta del mismo DNI → gestor de campo ancla"
+                    ),
+                }.get(dec.motivo, f"Pase call→campo ({dec.motivo})")
+                pasos.append(
+                    CallToCampoTransition(
+                        cliente_id=cliente.id,
+                        codigo_cliente=dec.codigo_cliente,
+                        seccion_call=seccion_call,
+                        seccion_territorial=seccion_dest,
+                        call_gestor_uid_anterior=uid_anterior,
+                        motivo=motivo_txt,
+                    )
+                )
+        if commit:
+            session.commit()
+        return {
+            "cambios": cambios,
+            "pasos_a_campo": pasos,
+            "pasos_a_call": batch.pasos_a_call,
+            "decisiones": len(batch.decisiones),
+        }
+
     def distribute_call_center(
         self,
         campana_id: str | None = None,
@@ -928,14 +1039,20 @@ class CampaignManager:
         admin_uid: str = "",
         admin_nombre: str = "",
     ) -> DistributionResult:
-        """Reparte cuentas tramo 1 entre gestores de call center (LPT por monto)."""
+        """Reparte cuentas call entre gestores (pools E1/E2/E3 + LPT)."""
         with self.db.session() as session:
             campana = self._get_campana(session, campana_id)
             if campana is None:
                 r = DistributionResult(campana_id=campana_id or "N/A")
                 r.errores.append("No se encontró campaña activa.")
                 return r
+            # Recalcular fases antes de repartir (arrastre DNI, monto, etc.)
+            self._apply_fases_in_session(session, campana.id)
             gestores = filter_call_gestores(gestores_firestore or [])
+            if firebase_service and not rebalance_all:
+                self._sync_manual_call_assignments_from_firebase(
+                    session, campana.id, gestores, firebase_service,
+                )
             result = distribute_tramo1(
                 session,
                 campana.id,
@@ -954,12 +1071,65 @@ class CampaignManager:
                 cambios=result.cambios,
                 tipo=result.tipo or "reparto_inicial",
                 motivo=result.motivo,
-                algoritmo="LPT",
+                algoritmo="buckets_r6_lpt",
                 firebase_service=firebase_service,
                 admin_uid=admin_uid,
                 admin_nombre=admin_nombre,
             )
         return result
+
+    def _sync_manual_call_assignments_from_firebase(
+        self,
+        session,
+        campana_id: str,
+        gestores_call: list,
+        firebase_service,
+    ) -> int:
+        """Trae a SQLite los movimientos puntuales hechos desde la APK."""
+        if not firebase_service or not getattr(firebase_service, "_initialized", False):
+            return 0
+        updated = 0
+        for g in gestores_call:
+            uid = str(g.get("uid") or g.get("id") or "").strip()
+            if not uid:
+                continue
+            nombre = str(g.get("nombre") or g.get("email") or uid)
+            try:
+                rows = firebase_service.list_section_clients(
+                    make_call_section_key(uid),
+                )
+            except Exception:
+                continue
+            for data in rows:
+                if not data.get("call_asignacion_manual"):
+                    continue
+                codigo = str(data.get("codigo_cliente") or data.get("id") or "").strip()
+                if not codigo:
+                    continue
+                cliente = (
+                    session.query(Cliente)
+                    .filter(
+                        Cliente.campana_id == campana_id,
+                        Cliente.codigo_cliente == codigo,
+                    )
+                    .first()
+                )
+                if cliente is None:
+                    continue
+                if (cliente.call_gestor_uid or "") == uid:
+                    continue
+                cliente.call_gestor_uid = uid
+                cliente.call_gestor_nombre = (
+                    data.get("call_gestor_nombre") or nombre
+                )
+                updated += 1
+        if updated:
+            session.flush()
+            logger.info(
+                "Sincronizadas %d asignaciones call manuales desde Firebase",
+                updated,
+            )
+        return updated
 
     def preview_call_center_distribution(
         self,
@@ -1916,6 +2086,8 @@ class CampaignManager:
             "fallecido_inubicable": 0,
             "suplantacion": 0,
             "pago_no_registrado": 0,
+            "no_hizo_pedido": 0,
+            "completo_pedido_socia": 0,
             "deuda_total": 0.0,
             "deuda_visitada": 0.0,
         }
@@ -2241,6 +2413,7 @@ class CampaignManager:
         formato_publicacion: str = "",
         estado_publicacion: str = "",
         gestor_publicacion: str = "",
+        semaforo: str = "",
     ) -> Dict[str, Any]:
         """
         Return one paginated page of clients for local desktop browsing.
@@ -2266,6 +2439,7 @@ class CampaignManager:
                 formato_publicacion=formato_publicacion,
                 estado_publicacion=estado_publicacion,
                 gestor_publicacion=gestor_publicacion,
+                semaforo=semaforo,
             )
             total = query.with_entities(func.count(Cliente.id)).scalar() or 0
 
@@ -2865,6 +3039,7 @@ class CampaignManager:
         formato_publicacion: str = "",
         estado_publicacion: str = "",
         gestor_publicacion: str = "",
+        semaforo: str = "",
     ):
         if region:
             query = query.filter(Cliente.region == region)
@@ -2881,6 +3056,16 @@ class CampaignManager:
                 query = query.filter(Cliente.campana_banco == campana_banco)
         if estado:
             query = query.filter(Cliente.estado_gestion == estado)
+        if semaforo:
+            from .semaforo import SIN_CLASIFICAR, normalize_semaforo
+            if semaforo == SIN_CLASIFICAR:
+                query = query.filter(
+                    (Cliente.semaforo.is_(None)) | (Cliente.semaforo == "")
+                )
+            else:
+                key = normalize_semaforo(semaforo)
+                if key:
+                    query = query.filter(Cliente.semaforo == key)
         if search:
             term = f"%{search.strip()}%"
             query = query.filter(
@@ -3080,6 +3265,7 @@ class CampaignManager:
             "dia_ciclo": c.dia_ciclo,
             "estado_ciclo": c.estado_ciclo or EstadoCiclo.ACTIVA.value,
             "fecha_asignacion_dt": format_fecha_iso(c.fecha_asignacion_dt),
+            "fecha_cierre_dt": format_fecha_iso(c.fecha_cierre_dt),
             "fecha_cierre_real": format_fecha_iso(c.fecha_cierre_real),
             "gestion_especial": bool(getattr(c, "gestion_especial", False)),
             "motivo_gestion_especial": c.motivo_gestion_especial or "",
@@ -3089,6 +3275,7 @@ class CampaignManager:
             "call_gestor_nombre": c.call_gestor_nombre or "",
             "seccion_key_origen": get_territorial_seccion_key(c),
             "etiquetas": _parse_etiquetas_json(getattr(c, "etiquetas", None)),
+            "semaforo": getattr(c, "semaforo", None) or "",
         }
 
         if include_sensitive:
@@ -3135,9 +3322,29 @@ class CampaignManager:
                 q = q.filter(Cliente.activo_en_cartera.is_(True))
             clientes = q.order_by(Cliente.seccion, Cliente.codigo_cliente).all()
 
+            # Arrastre DNI: cuentas en campo del mismo DNI van a la sección ancla
+            from .fase_reparto import (
+                build_dni_campo_index,
+                _pick_ancla_from_campo_rows,
+            )
+            dni_campo = build_dni_campo_index(clientes)
+            ancla_seccion_by_dni: dict[str, str] = {}
+            for dni, rows in dni_campo.items():
+                _uid, _nom, sk = _pick_ancla_from_campo_rows(rows)
+                if sk:
+                    ancla_seccion_by_dni[dni] = sk
+
             by_seccion: Dict[str, list] = {}
             for c in clientes:
                 sec_key = get_effective_firestore_section(c)
+                dni = (c.numero_documento or "").strip()
+                if (
+                    getattr(c, "fase_gestion", FASE_GESTION_CAMPO) == FASE_GESTION_CAMPO
+                    and dni
+                    and dni in ancla_seccion_by_dni
+                ):
+                    # Segunda cuenta / unificación: vivir en sección del ancla
+                    sec_key = ancla_seccion_by_dni[dni]
                 if sec_key not in by_seccion:
                     by_seccion[sec_key] = []
                 client_dict = self._cliente_to_dict(c, include_sensitive=True)
@@ -3147,6 +3354,15 @@ class CampaignManager:
                     and c.call_gestor_uid
                 ):
                     client_dict["seccion_key"] = sec_key
+                elif (
+                    getattr(c, "fase_gestion", FASE_GESTION_CAMPO) == FASE_GESTION_CAMPO
+                    and dni
+                    and dni in ancla_seccion_by_dni
+                    and ancla_seccion_by_dni[dni] != get_territorial_seccion_key(c)
+                ):
+                    client_dict["seccion_key"] = ancla_seccion_by_dni[dni]
+                    client_dict["seccion_key_origen"] = get_territorial_seccion_key(c)
+                    client_dict["arrastre_dni"] = True
                 if c.numero_documento:
                     client_dict["contactos_seed"] = get_contactos_persona(
                         session, c.numero_documento
@@ -3207,6 +3423,7 @@ class CampaignManager:
             "gestor_devolucion_uid", "gestor_devolucion_nombre", "gestor_devolucion_seccion",
             "seccion_key", "region", "zona", "seccion",
             "etiquetas",
+            "semaforo",
         ]
 
         with self.db.session() as session:
@@ -3896,6 +4113,42 @@ class CampaignManager:
                 seccion_key,
                 str(codigo_cliente),
                 clean,
+            )
+        return True
+
+    def set_client_semaforo(
+        self,
+        campana_id: str,
+        codigo_cliente: str,
+        semaforo: str,
+        *,
+        firebase_service=None,
+        firestore_campaign_id: str = "cartera_activa",
+    ) -> bool:
+        """Assign semáforo to a client locally and optionally push to Firestore."""
+        from .semaforo import normalize_semaforo
+        value = normalize_semaforo(semaforo)
+        with self.db.session() as session:
+            cliente = (
+                session.query(Cliente)
+                .filter(
+                    Cliente.campana_id == campana_id,
+                    Cliente.codigo_cliente == str(codigo_cliente),
+                )
+                .first()
+            )
+            if cliente is None:
+                return False
+            cliente.semaforo = value
+            cliente.fecha_actualizacion = datetime.now()
+            seccion_key = get_effective_firestore_section(cliente)
+            session.commit()
+        if firebase_service and firebase_service.is_initialized:
+            firebase_service.update_client_semaforo_firestore(
+                firestore_campaign_id,
+                seccion_key,
+                str(codigo_cliente),
+                value,
             )
         return True
 

@@ -7,6 +7,8 @@ import '../models/client_model.dart';
 import '../models/user_model.dart';
 import '../utils/campana_banco_utils.dart';
 import '../utils/contact_metrics_utils.dart';
+import '../utils/section_load_utils.dart';
+import '../utils/section_utils.dart';
 import 'campaign_service.dart';
 import 'firestore_service.dart';
 
@@ -20,6 +22,8 @@ class CampaignStatsService {
   String? _cacheCampaignId;
   String? _cacheSectionsKey;
   String? _cacheCampanaBancoFilter;
+  List<ClientModel>? _clientsCache;
+  String? _clientsCacheKey;
 
   /// Clientes activos sin filtro de campaña del banco (para chips de filtro).
   Future<List<ClientModel>> loadActiveClients({
@@ -27,8 +31,18 @@ class CampaignStatsService {
     List<String>? sectionFilter,
   }) async {
     final sections = sectionFilter ??
-        await _campaign.getAvailableSections(campaignId);
-    return _loadClientsDeduped(campaignId, sections);
+        await _campaign.getAvailableSections(
+          campaignId,
+          onlyWithClients: true,
+        );
+    final key = '$campaignId|${sections.join('|')}';
+    if (_clientsCache != null && _clientsCacheKey == key) {
+      return _clientsCache!;
+    }
+    final clients = await _loadClientsDeduped(campaignId, sections);
+    _clientsCache = clients;
+    _clientsCacheKey = key;
+    return clients;
   }
 
   Future<CampaignStats> loadForCampaign({
@@ -48,9 +62,15 @@ class CampaignStatsService {
     }
 
     final sections = sectionFilter ??
-        await _campaign.getAvailableSections(campaignId);
+        await _campaign.getAvailableSections(
+          campaignId,
+          onlyWithClients: true,
+        );
 
-    var clients = await _loadClientsDeduped(campaignId, sections);
+    var clients = await loadActiveClients(
+      campaignId: campaignId,
+      sectionFilter: sections,
+    );
     clients = applyCampanaBancoFilter(clients, campanaBancoFilter);
     final config = await _loadConfig();
     final gestores = await _firestore.getGestoresActivos();
@@ -76,6 +96,8 @@ class CampaignStatsService {
     _cacheCampaignId = null;
     _cacheSectionsKey = null;
     _cacheCampanaBancoFilter = null;
+    _clientsCache = null;
+    _clientsCacheKey = null;
   }
 
   Future<List<ClientModel>> _loadClientsDeduped(
@@ -86,7 +108,9 @@ class CampaignStatsService {
 
     Future<void> loadSection(String section) async {
       try {
-        final list = await _firestore.getClients(campaignId, section);
+        final list = await _firestore
+            .getClients(campaignId, section)
+            .timeout(const Duration(seconds: 25));
         for (final c in list) {
           if (!c.isActiveForGestor) continue;
           final key = c.numeroDocumento.isNotEmpty
@@ -103,7 +127,11 @@ class CampaignStatsService {
       }
     }
 
-    await Future.wait(sections.map(loadSection));
+    await mapPool<void, String>(
+      sections,
+      loadSection,
+      concurrency: defaultSectionLoadConcurrency(isWeb: kIsWeb),
+    );
     return deduped.values.toList();
   }
 
@@ -294,10 +322,9 @@ class CampaignStatsService {
   Map<String, String> _buildSectionToUid(List<UserModel> gestores) {
     final map = <String, String>{};
     for (final g in gestores) {
-      for (final s in g.secciones) {
+      for (final s in resolveGestorSectionKeys(g)) {
         if (s.isNotEmpty) map[s] = g.uid;
       }
-      if (g.seccion.isNotEmpty) map[g.seccion] = g.uid;
     }
     return map;
   }

@@ -63,6 +63,7 @@ class AuthResult:
             "admin": "Administrador",
             "supervisor": "Supervisor",
             "asistente": "Asistente",
+            "resolutor": "Resolutor",
             "gestor": "Gestor",
         }.get(self.rol, self.rol.capitalize() if self.rol else "Sin rol")
 

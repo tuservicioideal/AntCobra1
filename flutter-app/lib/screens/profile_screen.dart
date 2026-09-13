@@ -9,10 +9,13 @@ import '../models/gestor_stats.dart';
 import '../services/auth_service.dart';
 
 import '../services/campana_banco_filter_notifier.dart';
+import '../services/map_visit_candidates_notifier.dart';
 
 import '../services/connectivity_service.dart';
 
 import '../services/gestor_stats_service.dart';
+
+import '../utils/section_utils.dart';
 
 import '../services/campaign_service.dart';
 
@@ -25,14 +28,17 @@ import '../widgets/gestor_profile_stats_panel.dart';
 import '../widgets/admin/admin_quick_action_tile.dart';
 
 import 'admin_screen.dart';
+import 'bitacora_campo_screen.dart';
 import 'reassignment_screen.dart';
 
 import 'client_map_screen.dart';
+import 'section_clients_picker_screen.dart';
 
 import 'more_screen.dart';
 
 import 'client_search_screen.dart';
 import 'stats_screen.dart';
+import 'whatsapp_plantillas_screen.dart';
 
 
 
@@ -236,6 +242,34 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
 
 
+  void _openSectionClients(SectionStats section) {
+
+    final stats = _stats;
+
+    if (stats == null) return;
+
+    Navigator.of(context).push(
+
+      MaterialPageRoute<void>(
+
+        builder: (_) => SectionClientsPickerScreen(
+
+          sectionKey: section.sectionKey,
+
+          clients: stats.clientsForSection(section.sectionKey),
+
+          canSendToMap: true,
+
+        ),
+
+      ),
+
+    );
+
+  }
+
+
+
   @override
 
   Widget build(BuildContext context) {
@@ -268,15 +302,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
 
 
-    final allSections = <String>{
-
-      ...profile.secciones,
-
-      if (profile.seccion.isNotEmpty) profile.seccion,
-
-    }.toList()
-
-      ..sort();
+    final allSections = resolveGestorSectionKeys(profile);
 
 
 
@@ -455,6 +481,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   onRefresh: _loadStats,
 
                   onViewFullStats: _openFullStats,
+
+                  onSectionTap: profile.isFieldGestor ? _openSectionClients : null,
 
                 )
 
@@ -651,6 +679,28 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     ],
 
                     if (profile.canManageUsers) ...[
+
+                      const Divider(height: 1),
+
+                      AdminQuickActionTile(
+
+                        icon: Icons.menu_book_outlined,
+
+                        title: 'Bitácora de campo',
+
+                        subtitle: 'GPS, Telegram y notas del equipo',
+
+                        onTap: () => Navigator.of(context).push(
+
+                          MaterialPageRoute<void>(
+
+                            builder: (_) => const BitacoraCampoScreen(),
+
+                          ),
+
+                        ),
+
+                      ),
 
                       const Divider(height: 1),
 
@@ -865,6 +915,34 @@ class _ProfileScreenState extends State<ProfileScreen> {
               child: Column(
 
                 children: [
+
+                  ListTile(
+
+                    leading: const Icon(Icons.chat, color: Color(0xFF25D366)),
+
+                    title: const Text('Mensajes WhatsApp'),
+
+                    subtitle: const Text(
+
+                      'Plantillas con datos del cliente al abrir WhatsApp',
+
+                    ),
+
+                    trailing: const Icon(Icons.chevron_right),
+
+                    onTap: () => Navigator.of(context).push(
+
+                      MaterialPageRoute<void>(
+
+                        builder: (_) => const WhatsAppPlantillasScreen(),
+
+                      ),
+
+                    ),
+
+                  ),
+
+                  const Divider(height: 1),
 
                   ListTile(
 
@@ -1105,6 +1183,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
               Navigator.pop(ctx);
 
               context.read<CampanaBancoFilterNotifier>().clearAll();
+
+              context.read<MapVisitCandidatesNotifier>().clear();
 
               auth.signOut();
 

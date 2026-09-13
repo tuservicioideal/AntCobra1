@@ -85,10 +85,12 @@ class UserModel {
   bool get isAdmin => rol == 'admin';
   bool get isSupervisor => rol == 'supervisor';
   bool get isAsistente => rol == 'asistente';
+  bool get isResolutor => rol == 'resolutor';
   bool get isGestor => rol == 'gestor';
   bool get isCallGestor => isGestor && canal == 'call';
   bool get isFieldGestor => isGestor && canal != 'call';
   bool get canManageUsers => isAdmin || isSupervisor;
+  bool get canManageCasos => isAdmin || isSupervisor || isResolutor;
   bool get canViewStats => isAdmin || isSupervisor || isAsistente;
   bool get canViewDashboard => true; // All roles
 

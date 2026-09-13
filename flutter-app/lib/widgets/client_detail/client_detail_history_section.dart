@@ -4,27 +4,43 @@ import '../../models/visita_historial.dart';
 import '../../utils/client_status_ui.dart';
 
 /// Timeline de visitas/gestiones pasadas de un cliente.
-class ClientDetailHistorySection extends StatelessWidget {
+class ClientDetailHistorySection extends StatefulWidget {
   final List<VisitaHistorial> visitas;
   final bool loading;
   final bool showCombinedLabel;
+  final int initialCount;
 
   const ClientDetailHistorySection({
     super.key,
     required this.visitas,
     this.loading = false,
     this.showCombinedLabel = false,
+    this.initialCount = 5,
   });
 
   @override
+  State<ClientDetailHistorySection> createState() =>
+      _ClientDetailHistorySectionState();
+}
+
+class _ClientDetailHistorySectionState
+    extends State<ClientDetailHistorySection> {
+  bool _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
-    if (loading) {
+    if (widget.loading) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 12),
         child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
       );
     }
-    if (visitas.isEmpty) return const SizedBox.shrink();
+    if (widget.visitas.isEmpty) return const SizedBox.shrink();
+
+    final visible = _expanded
+        ? widget.visitas.take(20).toList()
+        : widget.visitas.take(widget.initialCount).toList();
+    final hasMore = widget.visitas.length > widget.initialCount;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
@@ -38,20 +54,57 @@ class ClientDetailHistorySection extends StatelessWidget {
               children: [
                 Icon(Icons.history, size: 18, color: AppTheme.primaryColor),
                 const SizedBox(width: 8),
-                Text(
-                  showCombinedLabel
-                      ? 'Historial de visitas (todas las cuentas)'
-                      : 'Historial de visitas',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 14,
-                    color: Colors.grey.shade800,
+                Expanded(
+                  child: Text(
+                    widget.showCombinedLabel
+                        ? 'Historial (${widget.visitas.length})'
+                        : 'Historial (${widget.visitas.length})',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 14,
+                      color: Colors.grey.shade800,
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
                   ),
                 ),
+                if (widget.showCombinedLabel)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: Text(
+                      'todas las cuentas',
+                      style: TextStyle(
+                          fontSize: 10, color: Colors.grey.shade600),
+                    ),
+                  ),
               ],
             ),
             const SizedBox(height: 10),
-            ...visitas.take(20).map(_visitTile),
+            ...visible.map(_visitTile),
+            if (hasMore)
+              TextButton.icon(
+                onPressed: () => setState(() => _expanded = !_expanded),
+                icon: Icon(
+                  _expanded ? Icons.expand_less : Icons.expand_more,
+                  size: 18,
+                ),
+                label: Text(
+                  _expanded
+                      ? 'Ver menos'
+                      : 'Ver ${widget.visitas.length - widget.initialCount} más',
+                  style: const TextStyle(fontSize: 12),
+                ),
+                style: TextButton.styleFrom(
+                  padding: EdgeInsets.zero,
+                  minimumSize: const Size(0, 32),
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                ),
+              ),
           ],
         ),
       ),

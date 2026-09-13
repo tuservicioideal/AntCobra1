@@ -81,6 +81,106 @@
         { "fieldPath": "cliente.cliente_id", "order": "ASCENDING" },
         { "fieldPath": "creado_at", "order": "DESCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "trabajos_cartera",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "creado_por_uid", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "casos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "etapa", "order": "ASCENDING" },
+        { "fieldPath": "fecha_apertura", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "casos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "abierto", "order": "ASCENDING" },
+        { "fieldPath": "fecha_apertura", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "casos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "tipo", "order": "ASCENDING" },
+        { "fieldPath": "etapa", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "casos",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "`campaña_id`", "order": "ASCENDING" },
+        { "fieldPath": "cliente_id", "order": "ASCENDING" },
+        { "fieldPath": "tipo", "order": "ASCENDING" },
+        { "fieldPath": "abierto", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "bitacora_campo",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "tipo", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "bitacora_campo",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "fecha_dia", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "bitacora_campo",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "tipo", "order": "ASCENDING" },
+        { "fieldPath": "fecha_dia", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "bitacora_campo",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "dni", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "bitacora_campo",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "seccion_key", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "bitacora_campo",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "usuario_uid", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "bitacora_campo",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "campaign_id", "order": "ASCENDING" },
+        { "fieldPath": "tipo", "order": "ASCENDING" },
+        { "fieldPath": "creado_at", "order": "DESCENDING" }
+      ]
     }
   ],
   "fieldOverrides": [

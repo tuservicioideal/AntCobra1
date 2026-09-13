@@ -163,3 +163,44 @@ def test_user_db_path_preferred_when_frozen(tmp_path, monkeypatch):
     db._migrate_legacy_db_if_needed(resolved)
     assert Path(resolved).exists()
     assert Path(resolved).read_bytes() == b"portable"
+
+
+def test_download_update_reuses_valid_zip(tmp_path, monkeypatch):
+    import zipfile
+
+    from services import update_service
+
+    folder = tmp_path / "updates"
+    folder.mkdir()
+    exe_name = "Cobranzas-Setup-1.0.29.exe"
+    zip_path = folder / "pkg.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr(exe_name, b"NEWEXE")
+    digest = update_service._sha256_file(str(zip_path))
+
+    info = update_service.UpdateInfo(
+        version="1.0.29",
+        filename=exe_name,
+        url="https://example.invalid/pkg.zip",
+        sha256=digest,
+        notes="",
+        published_at="",
+        package="pkg.zip",
+    )
+
+    def boom(*_a, **_k):
+        raise AssertionError("no debe volver a descargar un ZIP válido")
+
+    monkeypatch.setattr(update_service.requests, "get", boom)
+
+    result = update_service.download_update(info, dest_dir=str(folder))
+    assert result.success
+    assert Path(result.exe_path).read_bytes() == b"NEWEXE"
+
+
+def test_zip_matches_hash_false_when_missing(tmp_path):
+    from services import update_service
+
+    missing = tmp_path / "nope.zip"
+    assert update_service._zip_matches_hash(str(missing), "abc") is False
+    assert update_service._zip_matches_hash(str(missing), "") is False

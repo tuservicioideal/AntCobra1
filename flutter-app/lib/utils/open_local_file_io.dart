@@ -7,5 +7,10 @@ Future<void> openLocalFile(LocalFilePayload payload) async {
   if (path == null || path.isEmpty) {
     throw StateError('No hay ruta local para abrir el archivo.');
   }
-  await OpenFilex.open(path);
+  final mime = payload.mimeType;
+  if (mime != null && mime.isNotEmpty) {
+    await OpenFilex.open(path, type: mime);
+  } else {
+    await OpenFilex.open(path);
+  }
 }

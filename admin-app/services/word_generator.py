@@ -685,8 +685,6 @@ def generate_final_report(
     )
 
     # Summary table
-    summary_table = doc.add_table(rows=9, cols=2)
-    summary_table.style = 'Light Shading Accent 1'
     summary_rows = [
         ("Total de Clientes", str(total)),
         ("Clientes Visitados", str(visitados)),
@@ -696,8 +694,12 @@ def generate_final_report(
         ("No Ubicados", str(resumen.get("no_ubica", 0))),
         ("Suplantación", str(resumen.get("suplantacion", 0))),
         ("Pago No Registrado", str(resumen.get("pago_no_registrado", 0))),
+        ("No hizo pedido", str(resumen.get("no_hizo_pedido", 0))),
+        ("Completó pedido socia", str(resumen.get("completo_pedido_socia", 0))),
         ("Cobertura de Visitas", f"{cobertura:.1f}%"),
     ]
+    summary_table = doc.add_table(rows=len(summary_rows), cols=2)
+    summary_table.style = 'Light Shading Accent 1'
     for i, (label, value) in enumerate(summary_rows):
         summary_table.rows[i].cells[0].text = label
         summary_table.rows[i].cells[1].text = value

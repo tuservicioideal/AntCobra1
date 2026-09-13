@@ -11,10 +11,12 @@ class SyncStatusService extends ChangeNotifier {
   SyncStatusService(this._connectivity, this._tracking) {
     _connectivity.addListener(_onChange);
     _tracking.addListener(_onChange);
-    _syncSub = FirebaseFirestore.instance.snapshotsInSync().listen((_) {
-      _pendingClientWrites = 0;
-      notifyListeners();
-    });
+    if (!kIsWeb) {
+      _syncSub = FirebaseFirestore.instance.snapshotsInSync().listen((_) {
+        _pendingClientWrites = 0;
+        notifyListeners();
+      });
+    }
   }
 
   final ConnectivityService _connectivity;

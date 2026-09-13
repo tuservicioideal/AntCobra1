@@ -3,12 +3,18 @@ import '../../config/theme.dart';
 import '../../models/client_model.dart';
 import '../../utils/client_display_format.dart';
 import '../../utils/client_status_ui.dart';
+import '../cierre_badge.dart';
 
 /// Compact header: identity, metrics chips, debt bar.
 class ClientDetailHero extends StatelessWidget {
   final ClientModel client;
+  final int duracionDias;
 
-  const ClientDetailHero({super.key, required this.client});
+  const ClientDetailHero({
+    super.key,
+    required this.client,
+    this.duracionDias = 59,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -42,22 +48,33 @@ class ClientDetailHero extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      client.displayName,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
-                        color: AppTheme.textPrimary,
-                        height: 1.25,
+                    Tooltip(
+                      message: client.displayName,
+                      child: Text(
+                        client.displayName,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                          color: AppTheme.textPrimary,
+                          height: 1.25,
+                        ),
                       ),
                     ),
-                    if (client.numeroDocumento.isNotEmpty)
+                    if (client.numeroDocumento.isNotEmpty ||
+                        client.codigoCliente.isNotEmpty)
                       Padding(
                         padding: const EdgeInsets.only(top: 2),
                         child: Text(
-                          'DNI ${client.numeroDocumento}',
+                          [
+                            if (client.numeroDocumento.isNotEmpty)
+                              'DNI ${client.numeroDocumento}',
+                            if (client.codigoCliente.isNotEmpty)
+                              '· ${client.codigoCliente}',
+                          ].join(' '),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                           style: const TextStyle(
                             fontSize: 12,
                             color: AppTheme.textSecondary,
@@ -67,6 +84,7 @@ class ClientDetailHero extends StatelessWidget {
                   ],
                 ),
               ),
+              const SizedBox(width: 8),
               ClientStatusChip(estado: client.estadoGestion),
             ],
           ),
@@ -76,6 +94,11 @@ class ClientDetailHero extends StatelessWidget {
             runSpacing: 6,
             children: [
               _metricChip(client.cicloLabel),
+              CierreBadge(
+                client: client,
+                now: DateTime.now(),
+                duracionDias: duracionDias,
+              ),
               if (client.gestionEspecial)
                 _metricChip('Gestión especial', color: AppTheme.warning),
               _metricChip('${client.diasAtraso} días atraso'),

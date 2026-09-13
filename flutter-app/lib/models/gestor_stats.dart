@@ -39,6 +39,15 @@ class GestorStats {
   int get pendientes => total - visitados;
   double get avancePct => total > 0 ? visitados / total * 100 : 0;
 
+  /// Clientes de una clave territorial (misma agrupación que [porSeccion]).
+  List<ClientModel> clientsForSection(String sectionKey) {
+    return clients.where((c) => sectionKeyOf(c) == sectionKey).toList();
+  }
+
+  static String sectionKeyOf(ClientModel client) {
+    return client.seccionKey.isNotEmpty ? client.seccionKey : client.seccion;
+  }
+
   int get habidos => porEstado['visitado_habido'] ?? 0;
   int get noHabidos => porEstado['visitado_no_habido'] ?? 0;
   int get conGps => clients.where((c) => c.hasCoordinates).length;
@@ -81,13 +90,13 @@ class GestorStats {
 
     final sectionKeys = <String>{};
     for (final c in clients) {
-      final key = c.seccionKey.isNotEmpty ? c.seccionKey : c.seccion;
+      final key = sectionKeyOf(c);
       if (key.isNotEmpty) sectionKeys.add(key);
     }
 
     final porSeccion = sectionKeys.map((key) {
       final sectionClients =
-          clients.where((c) => (c.seccionKey.isNotEmpty ? c.seccionKey : c.seccion) == key);
+          clients.where((c) => sectionKeyOf(c) == key);
       final total = sectionClients.length;
       final visited = sectionClients.where((c) => !c.isPendiente).length;
       return SectionStats(sectionKey: key, total: total, visitados: visited);

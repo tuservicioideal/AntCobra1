@@ -725,101 +725,7 @@ class TramoEngine:
 
             cliente.fecha_actualizacion = datetime.now()
 
-
-
-            if (
-
-                tr.tramo_anterior == TramoEnum.TRAMO_1.value
-
-                and tr.tramo_nuevo == TramoEnum.TRAMO_2.value
-
-                and getattr(cliente, "fase_gestion", FASE_GESTION_CAMPO) == FASE_GESTION_CALL
-
-            ):
-
-                sin_contacto = cliente.estado_gestion != EstadoGestion.VISITADO_HABIDO.value
-
-                saldo_supera_umbral = cliente.importe_deuda_pendiente > UMBRAL_CARTA_FISICA
-
-                if sin_contacto and saldo_supera_umbral:
-
-                    seccion_call = (
-
-                        make_call_section_key(cliente.call_gestor_uid)
-
-                        if cliente.call_gestor_uid
-
-                        else ""
-
-                    )
-
-                    seccion_territorial = make_seccion_key(
-
-                        cliente.region or "", cliente.zona or "", cliente.seccion or "SIN_SECCION"
-
-                    )
-
-                    uid_anterior = cliente.call_gestor_uid or ""
-
-                    cliente.fase_gestion = FASE_GESTION_CAMPO
-
-                    cliente.call_gestor_uid = None
-
-                    cliente.call_gestor_nombre = None
-
-                    motivo_pase = (
-
-                        "Pase automático call→campo: sin contacto efectivo "
-
-                        f"y saldo S/ {cliente.importe_deuda_pendiente:.2f} > S/ {UMBRAL_CARTA_FISICA}"
-
-                    )
-
-                    result.pasos_a_campo.append(
-
-                        CallToCampoTransition(
-
-                            cliente_id=tr.cliente_id,
-
-                            codigo_cliente=tr.codigo_cliente,
-
-                            seccion_call=seccion_call,
-
-                            seccion_territorial=seccion_territorial,
-
-                            call_gestor_uid_anterior=uid_anterior,
-
-                            motivo=motivo_pase,
-
-                        )
-
-                    )
-
-                    session.add(
-
-                        HistorialZona(
-
-                            campana_id=result.campana_id,
-
-                            codigo_cliente=tr.codigo_cliente,
-
-                            event_id=f"call_campo_{tr.cliente_id}_{datetime.now().isoformat()}",
-
-                            seccion_anterior=seccion_call or seccion_territorial,
-
-                            seccion_nueva=seccion_territorial,
-
-                            usuario_nombre="Sistema",
-
-                            usuario_email="sistema@antcobranzas",
-
-                            fecha_evento=datetime.now().isoformat(),
-
-                        )
-
-                    )
-
-
+            # El pase call↔campo se recalcula en lote al final (matriz fase_reparto).
 
             historial = HistorialTramo(
 
@@ -843,7 +749,8 @@ class TramoEngine:
 
             count += 1
 
-
+        # Recalcular fases call/campo (monto, habido, arrastre DNI) tras cambios de tramo
+        self._apply_fase_reparto_after_transitions(session, result)
 
         session.commit()
 
@@ -856,6 +763,82 @@ class TramoEngine:
         )
 
         return count
+
+    def _apply_fase_reparto_after_transitions(
+        self,
+        session: Session,
+        result: EvaluationResult,
+    ) -> None:
+        """Aplica matriz call/campo y llena result.pasos_a_campo."""
+        from .fase_reparto import (
+            evaluate_fases_batch,
+            apply_fase_decision_to_cliente,
+            resolve_campo_seccion_for_decision,
+            MOTIVO_PASA_CAMPO_MONTO,
+            MOTIVO_SEGUNDA_CUENTA_CAMPO,
+        )
+        clientes = (
+            session.query(Cliente)
+            .filter(
+                Cliente.campana_id == result.campana_id,
+                Cliente.activo_en_cartera.is_(True),
+            )
+            .all()
+        )
+        batch = evaluate_fases_batch(clientes, allow_return_to_call=False)
+        by_codigo = {
+            (c.codigo_cliente or str(c.id)): c for c in clientes
+        }
+        # Limpiar pasos previos del evaluate (pueden estar desfasados)
+        result.pasos_a_campo.clear()
+
+        for dec in batch.decisiones:
+            cliente = by_codigo.get(dec.codigo_cliente)
+            if cliente is None:
+                continue
+            fase_prev = getattr(cliente, "fase_gestion", "") or ""
+            uid_anterior = cliente.call_gestor_uid or ""
+            seccion_call = (
+                make_call_section_key(uid_anterior) if uid_anterior else ""
+            )
+            changed = apply_fase_decision_to_cliente(cliente, dec)
+            if not changed and fase_prev == dec.fase:
+                continue
+            if fase_prev == FASE_GESTION_CALL and dec.fase == FASE_GESTION_CAMPO:
+                seccion_dest = resolve_campo_seccion_for_decision(dec)
+                motivo_txt = {
+                    MOTIVO_PASA_CAMPO_MONTO: (
+                        f"Pase automático call→campo: sin contacto efectivo "
+                        f"y saldo S/ {cliente.importe_deuda_pendiente:.2f} "
+                        f"> S/ {UMBRAL_CARTA_FISICA}"
+                    ),
+                    MOTIVO_SEGUNDA_CUENTA_CAMPO: (
+                        "Pase call→campo: segunda cuenta del mismo DNI "
+                        "ya en gestores de campo"
+                    ),
+                }.get(dec.motivo, f"Pase call→campo ({dec.motivo})")
+                result.pasos_a_campo.append(
+                    CallToCampoTransition(
+                        cliente_id=cliente.id,
+                        codigo_cliente=dec.codigo_cliente,
+                        seccion_call=seccion_call,
+                        seccion_territorial=seccion_dest,
+                        call_gestor_uid_anterior=uid_anterior,
+                        motivo=motivo_txt,
+                    )
+                )
+                session.add(
+                    HistorialZona(
+                        campana_id=result.campana_id,
+                        codigo_cliente=dec.codigo_cliente,
+                        event_id=f"call_campo_{cliente.id}_{datetime.now().isoformat()}",
+                        seccion_anterior=seccion_call or seccion_dest,
+                        seccion_nueva=seccion_dest,
+                        usuario_nombre="Sistema",
+                        usuario_email="sistema@antcobranzas",
+                        fecha_evento=datetime.now().isoformat(),
+                    )
+                )
 
 
 

@@ -8,6 +8,7 @@ import '../services/campana_banco_filter_notifier.dart';
 import '../services/campaign_service.dart';
 import '../services/campaign_stats_service.dart';
 import '../utils/campana_banco_utils.dart';
+import '../utils/section_utils.dart';
 import '../utils/stats_format.dart';
 import '../widgets/campana_banco_filter_bar.dart';
 import '../widgets/stats/stats_ranking_list.dart';
@@ -31,6 +32,7 @@ class _StatsScreenState extends State<StatsScreen>
   final _statsService = CampaignStatsService();
 
   bool _loading = true;
+  String? _loadError;
   CampaignStats? _stats;
   bool _isExecutiveView = false;
   TabController? _tabController;
@@ -44,70 +46,104 @@ class _StatsScreenState extends State<StatsScreen>
   }
 
   Future<void> _loadStats({bool forceRefresh = false}) async {
-    setState(() => _loading = true);
-
-    final campaignId = await _campaignService.getActiveCampaignId();
-    if (campaignId == null) {
-      if (mounted) setState(() => _loading = false);
+    if (forceRefresh) {
+      _statsService.clearCache();
+    }
+    if (mounted) {
+      setState(() {
+        _loading = true;
+        _loadError = null;
+      });
+    } else {
       return;
     }
-    if (!mounted) return;
 
-    final auth = context.read<AuthService>();
-    final profile = auth.profile;
-    List<String>? sectionFilter;
-
-    if (profile?.isGestor ?? false) {
-      sectionFilter = <String>{
-        ...(profile?.secciones ?? const <String>[]),
-        if ((profile?.seccion ?? '').isNotEmpty) profile!.seccion,
-      }.toList()
-        ..sort();
-    }
-
-    final allClients = await _statsService.loadActiveClients(
-      campaignId: campaignId,
-      sectionFilter: sectionFilter,
-    );
-    if (mounted) {
-      context.read<CampanaBancoFilterNotifier>().updateAvailable(allClients);
-    }
-
-    final campanaFilter =
-        context.read<CampanaBancoFilterNotifier>().selected;
-
-    final stats = await _statsService.loadForCampaign(
-      campaignId: campaignId,
-      sectionFilter: sectionFilter,
-      campanaBancoFilter: campanaFilter,
-      forceRefresh: forceRefresh,
-    );
-
-    if (!mounted) return;
-
-    final executive = profile != null &&
-        profile.canViewStats &&
-        !profile.isGestor;
-
-    TabController? tabs = _tabController;
-    if (executive && (tabs == null || tabs.length != 4)) {
-      tabs?.dispose();
-      tabs = TabController(
-        length: 4,
-        vsync: this,
-        initialIndex: widget.initialTab.clamp(0, 3),
+    try {
+      // Timeout global para no dejar spinner infinito si Firestore web se cuelga.
+      await _loadStatsInner(forceRefresh: forceRefresh).timeout(
+        const Duration(seconds: 60),
       );
-    } else if (!executive && tabs != null) {
-      tabs.dispose();
-      tabs = null;
+    } catch (e) {
+      debugPrint('StatsScreen _loadStats: $e');
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _loadError = e.toString();
+      });
     }
+  }
 
-    setState(() {
-      _stats = stats;
-      _isExecutiveView = executive;
-      _tabController = tabs;
-      _loading = false;
-    });
+  Future<void> _loadStatsInner({bool forceRefresh = false}) async {
+    try {
+      final campaignId = await _campaignService
+          .getActiveCampaignId()
+          .timeout(const Duration(seconds: 20));
+      if (campaignId == null) {
+        if (mounted) setState(() => _loading = false);
+        return;
+      }
+      if (!mounted) return;
+
+      final auth = context.read<AuthService>();
+      final profile = auth.profile;
+      List<String>? sectionFilter;
+
+      if (profile?.isGestor ?? false) {
+        sectionFilter = resolveGestorSectionKeys(profile);
+      }
+
+      final allClients = await _statsService
+          .loadActiveClients(
+            campaignId: campaignId,
+            sectionFilter: sectionFilter,
+          )
+          .timeout(const Duration(seconds: 45));
+      if (mounted) {
+        context.read<CampanaBancoFilterNotifier>().updateAvailable(allClients);
+      }
+
+      final campanaFilter =
+          context.read<CampanaBancoFilterNotifier>().selected;
+
+      final stats = await _statsService
+          .loadForCampaign(
+            campaignId: campaignId,
+            sectionFilter: sectionFilter,
+            campanaBancoFilter: campanaFilter,
+            forceRefresh: forceRefresh,
+          )
+          .timeout(const Duration(seconds: 45));
+
+      if (!mounted) return;
+
+      final executive = profile != null &&
+          profile.canViewStats &&
+          !profile.isGestor;
+
+      TabController? tabs = _tabController;
+      if (executive && (tabs == null || tabs.length != 4)) {
+        tabs?.dispose();
+        tabs = TabController(
+          length: 4,
+          vsync: this,
+          initialIndex: widget.initialTab.clamp(0, 3),
+        );
+      } else if (!executive && tabs != null) {
+        tabs.dispose();
+        tabs = null;
+      }
+
+      setState(() {
+        _stats = stats;
+        _isExecutiveView = executive;
+        _tabController = tabs;
+        _loading = false;
+      });
+    } catch (e) {
+      debugPrint('StatsScreen _loadStatsInner: $e');
+      // Re-lanzar para que _loadStats muestre el panel de error con Reintentar.
+      rethrow;
+    }
   }
 
   @override
@@ -208,26 +244,29 @@ class _StatsScreenState extends State<StatsScreen>
                       color: AppTheme.primaryColor,
                     ),
                   )
-                : _stats == null || _stats!.total == 0
-                    ? _buildEmpty()
-                    : _isExecutiveView && _tabController != null
-                        ? TabBarView(
-                            controller: _tabController,
-                            children: [
-                              _buildScroll(
-                                _buildResumenTab(_stats!, showGanancia: true),
+                : _loadError != null
+                    ? _buildLoadError()
+                    : _stats == null || _stats!.total == 0
+                        ? _buildEmpty()
+                        : _isExecutiveView && _tabController != null
+                            ? TabBarView(
+                                controller: _tabController,
+                                children: [
+                                  _buildScroll(
+                                    _buildResumenTab(_stats!,
+                                        showGanancia: true),
+                                  ),
+                                  _buildScroll(_buildFinanzasTab(_stats!)),
+                                  _buildScroll(_buildEquipoTab(_stats!)),
+                                  _buildScroll(_buildTerritorioTab(_stats!)),
+                                ],
+                              )
+                            : _buildScroll(
+                                _buildGestorSummary(
+                                  _stats!,
+                                  showGanancia: false,
+                                ),
                               ),
-                              _buildScroll(_buildFinanzasTab(_stats!)),
-                              _buildScroll(_buildEquipoTab(_stats!)),
-                              _buildScroll(_buildTerritorioTab(_stats!)),
-                            ],
-                          )
-                        : _buildScroll(
-                            _buildGestorSummary(
-                              _stats!,
-                              showGanancia: false,
-                            ),
-                          ),
           ),
         ],
       ),
@@ -261,6 +300,42 @@ class _StatsScreenState extends State<StatsScreen>
                 fontWeight: FontWeight.w600,
                 color: Colors.grey.shade700,
               ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLoadError() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.cloud_off_outlined,
+                size: 48, color: Colors.grey.shade400),
+            const SizedBox(height: 12),
+            Text(
+              'No se pudo cargar el panel',
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: Colors.grey.shade700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'La conexión con Firestore se cortó al leer la cartera. '
+              'Vuelve a intentar.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey.shade600, height: 1.35),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: () => _loadStats(forceRefresh: true),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Reintentar'),
             ),
           ],
         ),

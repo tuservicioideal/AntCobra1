@@ -240,6 +240,7 @@ class _AdminScreenState extends State<AdminScreen> {
                           _buildRoleChip('gestor', 'Gestor'),
                           _buildRoleChip('call', 'Call'),
                           _buildRoleChip('asistente', 'Asistente'),
+                          _buildRoleChip('resolutor', 'Resolutor'),
                           _buildRoleChip('supervisor', 'Supervisor'),
                           _buildRoleChip('admin', 'Admin'),
                         ],
@@ -252,6 +253,7 @@ class _AdminScreenState extends State<AdminScreen> {
                             _buildRoleChip('gestor', 'Gestor'),
                             _buildRoleChip('call', 'Call'),
                             _buildRoleChip('asistente', 'Asistente'),
+                            _buildRoleChip('resolutor', 'Resolutor'),
                             _buildRoleChip('supervisor', 'Supervisor'),
                             _buildRoleChip('admin', 'Admin'),
                           ],
@@ -619,6 +621,8 @@ class _AdminScreenState extends State<AdminScreen> {
         return Colors.purple.shade600;
       case 'asistente':
         return Colors.teal.shade600;
+      case 'resolutor':
+        return Colors.orange.shade700;
       default:
         return AppTheme.primaryColor;
     }
@@ -778,6 +782,8 @@ class _AdminScreenState extends State<AdminScreen> {
                       DropdownMenuItem(value: 'gestor', child: Text('Gestor')),
                       DropdownMenuItem(
                           value: 'asistente', child: Text('Asistente')),
+                      DropdownMenuItem(
+                          value: 'resolutor', child: Text('Resolutor')),
                       DropdownMenuItem(
                           value: 'supervisor', child: Text('Supervisor')),
                       DropdownMenuItem(value: 'admin', child: Text('Admin')),

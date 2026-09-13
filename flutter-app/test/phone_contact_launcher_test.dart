@@ -40,6 +40,17 @@ void main() {
         contains('estimado/a'),
       );
     });
+
+    test('custom cuerpo with values', () {
+      expect(
+        buildWhatsAppMessage(
+          clientName: 'A',
+          cuerpo: 'Deuda {deuda} de {nombre}',
+          values: {'nombre': 'Beto', 'deuda': 'S/ 5.00'},
+        ),
+        'Deuda S/ 5.00 de Beto',
+      );
+    });
   });
 
   group('buildWhatsAppUri', () {

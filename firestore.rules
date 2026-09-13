@@ -52,6 +52,31 @@ service cloud.firestore {
           && request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['nombre', 'telefono', 'email', 'zona', 'region'])
         );
+
+      // Plantillas WhatsApp personales: solo el dueño.
+      match /whatsapp_plantillas/{plantillaId} {
+        allow read: if isActiveUser() && request.auth.uid == userId;
+        allow delete: if isActiveUser() && request.auth.uid == userId;
+        allow create, update: if isActiveUser()
+          && request.auth.uid == userId
+          && request.resource.data.nombre is string
+          && request.resource.data.nombre.size() > 0
+          && request.resource.data.nombre.size() <= 80
+          && request.resource.data.cuerpo is string
+          && request.resource.data.cuerpo.size() > 0
+          && request.resource.data.cuerpo.size() <= 2000;
+      }
+    }
+
+    // ── Jobs de carga de cartera (Excel web) ─────────────────
+    // El cliente solo crea el doc inicial; parse/publish los escribe Admin SDK.
+    match /trabajos_cartera/{jobId} {
+      allow read: if isAdminOrSupervisor();
+      allow create: if isAdminOrSupervisor()
+        && request.resource.data.creado_por_uid == request.auth.uid
+        && request.resource.data.estado == 'subiendo'
+        && request.resource.data.campaign_id is string;
+      allow update, delete: if false;
     }
 
     // ── Campañas ─────────────────────────────────────────────
@@ -111,6 +136,18 @@ service cloud.firestore {
             allow update: if false;
             allow delete: if isAdminOrSupervisor() && campaignCollection == 'campañas';
           }
+
+          // Descargos del cliente: lo que respondió la persona contactada
+          // + evidencias (foto/audio en Storage). Append-only para auditoría.
+          match /descargos/{descargoId} {
+            allow read: if isActiveUser() && campaignCollection == 'campañas';
+            allow create: if campaignCollection == 'campañas' && isActiveUser() && (
+              isAdminOrSupervisor()
+              || (seccionId in getUserSections())
+            );
+            allow update: if false;
+            allow delete: if isAdminOrSupervisor() && campaignCollection == 'campañas';
+          }
         }
       }
     }
@@ -124,6 +161,52 @@ service cloud.firestore {
       allow read: if isActiveUser() && hasRole(['admin', 'supervisor', 'asistente']);
       allow update: if isAdminOrSupervisor();
       allow delete: if isAdminOrSupervisor();
+    }
+
+    // ── Casos de problema (embudo resolutor) ─────────────────
+    // Gestores abren casos; resolutor/admin/supervisor gestionan el embudo.
+    function canManageCasos() {
+      return isActiveUser() && hasRole(['resolutor', 'admin', 'supervisor']);
+    }
+
+    match /casos/{casoId} {
+      allow create: if isActiveUser()
+        && request.resource.data.tipo is string
+        && request.resource.data.etapa is string
+        && request.resource.data.abierto is bool;
+      allow read: if canManageCasos();
+      // Resolutor gestiona el embudo; gestores pueden reabrir/remarcar.
+      allow update: if canManageCasos()
+        || (
+          isActiveUser()
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly([
+              'etapa', 'abierto', 'fecha_etapa', 'fecha_apertura',
+              'nota_origen', 'gps_latitud', 'gps_longitud',
+              'gestor_uid', 'gestor_nombre', 'gestor_email',
+              'actualizado_por_uid', 'actualizado_por_nombre'
+            ])
+        );
+      allow delete: if isAdminOrSupervisor();
+
+      match /comentarios/{comentarioId} {
+        allow read: if canManageCasos();
+        allow create: if canManageCasos()
+          && request.resource.data.texto is string
+          && request.resource.data.uid == request.auth.uid;
+        allow update, delete: if false;
+      }
+
+      match /movimientos/{movimientoId} {
+        allow read: if canManageCasos();
+        allow create: if canManageCasos()
+          || (
+            isActiveUser()
+            && request.resource.data.de is string
+            && request.resource.data.a is string
+          );
+        allow update, delete: if false;
+      }
     }
 
     // ── Notificaciones (Base Updates → Gestores) ─────────────
@@ -209,6 +292,11 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    match /doxeo_lock/{docId} {
+      allow read: if isActiveUser();
+      allow write: if false;
+    }
+
     match /doxeo_jobs/{jobId} {
       allow read: if isActiveUser() && (
         isAdminOrSupervisor()
@@ -232,6 +320,26 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['estado'])
         && request.resource.data.estado == 'cancelado';
       allow delete: if false;
+    }
+
+    // ── Bitácora de campo (índice denormalizado admin/supervisor) ─
+    // Gestores/admin crean eventos al guardar GPS, notas o (vía worker) Telegram.
+    // Solo admin/supervisor leen. Append-only: sin update/delete desde clientes.
+    match /bitacora_campo/{eventId} {
+      allow read: if isAdminOrSupervisor();
+      allow create: if isActiveUser()
+        && request.resource.data.usuario_uid == request.auth.uid
+        && request.resource.data.keys().hasAll([
+          'tipo', 'creado_at', 'fecha_dia',
+          'campaign_id', 'seccion_key',
+          'cliente_id', 'cliente_nombre', 'codigo_cliente', 'dni',
+          'usuario_uid', 'usuario_nombre', 'usuario_rol',
+          'resumen', 'origen_id', 'origen_coleccion', 'payload'
+        ])
+        && request.resource.data.tipo in [
+          'ubicacion', 'telegram', 'nota_campo', 'nota_gestion'
+        ];
+      allow update, delete: if false;
     }
 
     // ── Rutas Diarias (Route Planning) ───────────────────────

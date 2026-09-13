@@ -1,5 +1,3 @@
-import 'dart:typed_data';
-
 import 'package:printing/printing.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:share_plus/share_plus.dart';

@@ -3,12 +3,15 @@ import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../models/bitacora_campo_entry.dart';
 import '../models/client_model.dart';
+import '../models/gestor_activity.dart';
 import '../models/visita_historial.dart';
 import '../models/my_routes_load_result.dart';
 import '../models/tracking_models.dart';
 import '../models/user_model.dart';
 import '../utils/section_utils.dart';
+import 'bitacora_campo_service.dart';
 import 'campaign_service.dart';
 import 'notification_service.dart';
 
@@ -16,6 +19,7 @@ import 'notification_service.dart';
 class FirestoreService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
   final FirebaseAuth _auth = FirebaseAuth.instance;
+  static const String _gestorActivitySource = 'gestor_activity';
 
   // ─────────────────── CLIENTS ───────────────────
 
@@ -40,6 +44,9 @@ class FirestoreService {
   }
 
   /// Load all clients for a given campaign + section (single composite key).
+  /// Con timeout para que un WebChannel colgado no deje el panel ejecutivo
+  /// en spinner infinito: ante timeout se devuelve [] y el panel muestra
+  /// error con botón Reintentar en vez de quedarse cargando.
   Future<List<ClientModel>> getClients(String campaignId, String section) async {
     try {
       final snapshot = await _db
@@ -48,7 +55,8 @@ class FirestoreService {
           .collection('gestores')
           .doc(section)
           .collection('clientes')
-          .get();
+          .get()
+          .timeout(const Duration(seconds: 20));
 
       return snapshot.docs.map((doc) {
         final data = Map<String, dynamic>.from(doc.data());
@@ -423,8 +431,10 @@ class FirestoreService {
     List<Map<String, dynamic>>? cartasGestor,
     String? gestorUid,
     String? gestorNombre,
+    String? usuarioRol,
   }) async {
-    final now = DateTime.now().toIso8601String();
+    final when = DateTime.now();
+    final now = when.toIso8601String();
     final data = <String, dynamic>{
       'estado_gestion': estado,
       'fecha_gestion': now,
@@ -462,11 +472,14 @@ class FirestoreService {
         .collection('clientes')
         .doc(clientId);
 
-    await clientRef.update(data);
-
+    final visitaRef = clientRef.collection('historial_visitas').doc();
     final histData = <String, dynamic>{
+      'source': 'historial_visitas',
+      'type': 'gestion_registrada',
       'estado_gestion': estado,
       'fecha_gestion': now,
+      'timestamp': now,
+      'fecha_dia': formatFechaDia(when),
       'nota_gestor': nota,
       if (lat != null && lng != null) ...{
         'gps_latitud': lat,
@@ -490,7 +503,189 @@ class FirestoreService {
       'campaign_id': campaignId,
       'client_id': clientId,
     };
-    await clientRef.collection('historial_visitas').add(histData);
+
+    final batch = _db.batch();
+    batch.update(clientRef, data);
+    batch.set(visitaRef, histData);
+
+    final notaTrim = nota.trim();
+    if (notaTrim.isNotEmpty &&
+        gestorUid != null &&
+        gestorUid.isNotEmpty) {
+      final meta = await _clientMetaForBitacora(clientRef);
+      final eventId = BitacoraCampoEntry.idNotaGestion(visitaRef.id);
+      final resumen = notaTrim.length > 140
+          ? '${notaTrim.substring(0, 137)}…'
+          : notaTrim;
+      batch.set(
+        BitacoraCampoService().docRef(eventId),
+        BitacoraCampoService.buildEventMap(
+          tipo: BitacoraCampoEntry.tipoNotaGestion,
+          when: when,
+          campaignId: campaignId,
+          seccionKey: section,
+          clienteId: clientId,
+          clienteNombre: meta.nombre,
+          codigoCliente: meta.codigo,
+          dni: meta.dni,
+          usuarioUid: gestorUid,
+          usuarioNombre: gestorNombre ?? '',
+          usuarioRol: usuarioRol ?? 'gestor',
+          resumen: 'Gestión ($estado): $resumen',
+          origenId: visitaRef.id,
+          origenColeccion: 'historial_visitas',
+          payload: {
+            'nota': notaTrim,
+            'estado_gestion': estado,
+          },
+          creadoAtServer: FieldValue.serverTimestamp(),
+        ),
+      );
+    }
+
+    await batch.commit();
+  }
+
+  CollectionReference<Map<String, dynamic>> _userActivityCollection(String gestorUid) {
+    return _db
+        .collection('actividad_usuarios')
+        .doc(gestorUid)
+        .collection('eventos');
+  }
+
+  Future<void> recordUserActivityEvent({
+    required String gestorUid,
+    required String gestorNombre,
+    required String seccionKey,
+    required String canalGestor,
+    required String campaignId,
+    required String clientId,
+    required String clientName,
+    required String type,
+    String phone = '',
+    bool launchSuccess = true,
+  }) async {
+    if (gestorUid.isEmpty || type.isEmpty) return;
+    final now = DateTime.now();
+    final nowIso = now.toIso8601String();
+    try {
+      await _userActivityCollection(gestorUid).add({
+        'event_source': _gestorActivitySource,
+        'source': 'activity_event',
+        'type': type,
+        'timestamp': nowIso,
+        'fecha': nowIso,
+        'fecha_dia': formatFechaDia(now),
+        'gestor_uid': gestorUid,
+        'gestor_nombre': gestorNombre,
+        'seccion_key': seccionKey,
+        'canal_gestor': canalGestor,
+        'campaign_id': campaignId,
+        'client_id': clientId,
+        'client_name': clientName,
+        'phone': phone,
+        'launch_success': launchSuccess,
+      });
+    } catch (e) {
+      debugPrint('Error recording user activity event: $e');
+    }
+  }
+
+  Future<List<GestorActivityEntry>> getGestorActivityFeed({
+    required DateTime day,
+    List<String> gestorUids = const [],
+  }) async {
+    final fechaDia = formatFechaDia(day);
+    final dayStartIso = DateTime(
+      day.year,
+      day.month,
+      day.day,
+    ).toIso8601String();
+    final nextDayIso = DateTime(
+      day.year,
+      day.month,
+      day.day,
+    ).add(const Duration(days: 1)).toIso8601String();
+
+    final events = await _getActivityEventsForDay(
+      fechaDia: fechaDia,
+      gestorUids: gestorUids,
+    );
+    final gestiones = await _getGestionesForDay(
+      fromIso: dayStartIso,
+      toIso: nextDayIso,
+      gestorUids: gestorUids,
+    );
+
+    final merged = <GestorActivityEntry>[...events, ...gestiones];
+    merged.sort((a, b) => b.sortKey.compareTo(a.sortKey));
+    return merged;
+  }
+
+  Future<List<GestorActivityEntry>> _getActivityEventsForDay({
+    required String fechaDia,
+    required List<String> gestorUids,
+  }) async {
+    try {
+      final snap = await _db
+          .collectionGroup('eventos')
+          .where('event_source', isEqualTo: _gestorActivitySource)
+          .where('fecha_dia', isEqualTo: fechaDia)
+          .get();
+      return snap.docs
+          .map((d) => GestorActivityEntry.fromMap(d.id, d.data()))
+          .where((e) => gestorUids.isEmpty || gestorUids.contains(e.gestorUid))
+          .toList();
+    } catch (e) {
+      debugPrint('Activity events collectionGroup fallback: $e');
+      return _getActivityEventsForDayFallback(
+        fechaDia: fechaDia,
+        gestorUids: gestorUids,
+      );
+    }
+  }
+
+  Future<List<GestorActivityEntry>> _getActivityEventsForDayFallback({
+    required String fechaDia,
+    required List<String> gestorUids,
+  }) async {
+    if (gestorUids.isEmpty) return [];
+    final items = <GestorActivityEntry>[];
+    for (final uid in gestorUids) {
+      try {
+        final snap = await _userActivityCollection(uid)
+            .where('fecha_dia', isEqualTo: fechaDia)
+            .get();
+        items.addAll(
+          snap.docs.map((d) => GestorActivityEntry.fromMap(d.id, d.data())),
+        );
+      } catch (e) {
+        debugPrint('Activity events fallback failed for $uid: $e');
+      }
+    }
+    return items;
+  }
+
+  Future<List<GestorActivityEntry>> _getGestionesForDay({
+    required String fromIso,
+    required String toIso,
+    required List<String> gestorUids,
+  }) async {
+    try {
+      final snap = await _db
+          .collectionGroup('historial_visitas')
+          .where('fecha_gestion', isGreaterThanOrEqualTo: fromIso)
+          .where('fecha_gestion', isLessThan: toIso)
+          .get();
+      return snap.docs
+          .map((d) => GestorActivityEntry.fromMap(d.id, d.data()))
+          .where((e) => e.gestorUid.isNotEmpty)
+          .where((e) => gestorUids.isEmpty || gestorUids.contains(e.gestorUid))
+          .toList();
+    } catch (e) {
+      debugPrint('Error loading gestiones for activity feed: $e');
+      return [];
+    }
   }
 
   /// Update etiquetas assigned to a client.
@@ -500,18 +695,131 @@ class FirestoreService {
     required String clientId,
     required List<String> etiquetas,
   }) async {
-    await _db
+    final unique = etiquetas.where((id) => id.trim().isNotEmpty).toSet().toList();
+    final ref = _db
         .collection('campañas')
         .doc(campaignId)
         .collection('gestores')
         .doc(section)
         .collection('clientes')
-        .doc(clientId)
-        .update({'etiquetas': etiquetas});
+        .doc(clientId);
+
+    final recovered = await _mergeClientFields(ref, {'etiquetas': unique});
+    if (!recovered) return;
+
+    final saved = _parseStringList((await _readClientData(ref))?['etiquetas']);
+    if (!_sameStringSet(saved, unique)) {
+      throw StateError(
+        'Las etiquetas no quedaron guardadas. Recarga la página e inténtalo de nuevo.',
+      );
+    }
+  }
+
+  /// Update semáforo (voluntad de pago) for a client.
+  Future<void> updateClientSemaforo({
+    required String campaignId,
+    required String section,
+    required String clientId,
+    required String semaforo,
+  }) async {
+    final value = semaforo.trim().toLowerCase();
+    final ref = _db
+        .collection('campañas')
+        .doc(campaignId)
+        .collection('gestores')
+        .doc(section)
+        .collection('clientes')
+        .doc(clientId);
+
+    final recovered = await _mergeClientFields(ref, {'semaforo': value});
+    if (!recovered) return;
+
+    final saved =
+        ((await _readClientData(ref))?['semaforo']?.toString() ?? '').trim();
+    if (saved != value) {
+      throw StateError(
+        'El semáforo no quedó guardado. Recarga la página e inténtalo de nuevo.',
+      );
+    }
+  }
+
+  /// Returns true if a Firestore web internal assertion was recovered from.
+  Future<bool> _mergeClientFields(
+    DocumentReference<Map<String, dynamic>> ref,
+    Map<String, dynamic> data,
+  ) async {
+    Object? lastError;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        if (attempt > 0) {
+          await Future<void>.delayed(const Duration(milliseconds: 350));
+        }
+        await ref.set(data, SetOptions(merge: true));
+        return attempt > 0;
+      } catch (e) {
+        lastError = e;
+        if (!_isFirestoreInternalAssertion(e)) rethrow;
+        debugPrint('Firestore write assertion (attempt ${attempt + 1}): $e');
+      }
+    }
+    // The JS SDK can throw after the write already reached the server.
+    final remote = await _readClientData(ref);
+    if (remote != null && _fieldsMatch(remote, data)) return true;
+    throw lastError ??
+        StateError('No se pudo guardar. Recarga la página e inténtalo de nuevo.');
+  }
+
+  static bool _fieldsMatch(Map<String, dynamic> remote, Map<String, dynamic> written) {
+    for (final entry in written.entries) {
+      if (entry.value is List) {
+        final expected = _parseStringList(entry.value);
+        final actual = _parseStringList(remote[entry.key]);
+        if (!_sameStringSet(expected, actual)) return false;
+      } else if (remote[entry.key] != entry.value) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Future<Map<String, dynamic>?> _readClientData(
+    DocumentReference<Map<String, dynamic>> ref,
+  ) async {
+    try {
+      final snap = await ref.get(const GetOptions(source: Source.server));
+      return snap.data();
+    } catch (_) {
+      try {
+        return (await ref.get()).data();
+      } catch (e) {
+        debugPrint('Could not re-read client after tag write: $e');
+        return null;
+      }
+    }
+  }
+
+  static bool _isFirestoreInternalAssertion(Object error) {
+    final text = error.toString();
+    return text.contains('INTERNAL ASSERTION FAILED') ||
+        text.contains('Unexpected state');
+  }
+
+  static List<String> _parseStringList(dynamic raw) {
+    if (raw is List) {
+      return raw.map((e) => e.toString()).where((e) => e.isNotEmpty).toList();
+    }
+    return const [];
+  }
+
+  static bool _sameStringSet(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    final left = a.toSet();
+    final right = b.toSet();
+    return left.length == right.length && left.containsAll(right);
   }
 
   /// All active accounts sharing the same DNI (collection group query).
-  /// Throws on index/permission/network failure so the UI can surface it.
+  /// Throws on index/permission/network failure; the UI falls back silently.
   Future<List<ClientModel>> getAccountsByDocumento(String numeroDocumento) async {
     if (numeroDocumento.trim().isEmpty) return [];
     try {
@@ -712,7 +1020,8 @@ class FirestoreService {
     String nivelConfianza = 'confiable',
     int orden = 0,
   }) async {
-    final nowIso = DateTime.now().toIso8601String();
+    final when = DateTime.now();
+    final nowIso = when.toIso8601String();
     final clientRef = _db
         .collection('campañas')
         .doc(campaignId)
@@ -735,7 +1044,6 @@ class FirestoreService {
       'actualizado_por_email': editorEmail,
       'origen_actualizacion': 'mobile',
     };
-    await clientRef.update(updateData);
 
     final histRef = clientRef.collection('historial_contacto').doc();
     final eventId = histRef.id;
@@ -745,7 +1053,7 @@ class FirestoreService {
             ? 'telefono'
             : 'alternativa';
 
-    await histRef.set({
+    final histData = <String, dynamic>{
       'fecha': nowIso,
       'fecha_evento': nowIso,
       'campo': 'contacto',
@@ -773,7 +1081,52 @@ class FirestoreService {
               'timestamp': nowIso,
             }
           : null,
-    });
+    };
+
+    final meta = await _clientMetaForBitacora(clientRef);
+    final notaTrim = notaCambio.trim();
+    final resumen = notaTrim.length > 140
+        ? '${notaTrim.substring(0, 137)}…'
+        : (notaTrim.isNotEmpty
+            ? notaTrim
+            : (addrChanged
+                ? 'Dirección observada'
+                : phoneChanged
+                    ? 'Teléfono observado'
+                    : 'Observación de campo'));
+
+    final batch = _db.batch();
+    batch.update(clientRef, updateData);
+    batch.set(histRef, histData);
+    if (editorUid.isNotEmpty) {
+      batch.set(
+        BitacoraCampoService().docRef(BitacoraCampoEntry.idNotaCampo(eventId)),
+        BitacoraCampoService.buildEventMap(
+          tipo: BitacoraCampoEntry.tipoNotaCampo,
+          when: when,
+          campaignId: campaignId,
+          seccionKey: section,
+          clienteId: clientId,
+          clienteNombre: meta.nombre,
+          codigoCliente: meta.codigo,
+          dni: meta.dni,
+          usuarioUid: editorUid,
+          usuarioNombre: editorNombre,
+          usuarioRol: editorRol,
+          resumen: resumen,
+          origenId: eventId,
+          origenColeccion: 'historial_contacto',
+          payload: {
+            'nota': notaTrim,
+            'tipo_contacto': tipo,
+            'direccion_nueva': addrChanged ? addrTrim : '',
+            'telefono_nuevo': phoneChanged ? phoneTrim : '',
+          },
+          creadoAtServer: FieldValue.serverTimestamp(),
+        ),
+      );
+    }
+    await batch.commit();
     return eventId;
   }
 
@@ -866,7 +1219,8 @@ class FirestoreService {
   // ─────────────────── GPS TRACKING ───────────────────
 
   /// Save current GPS as the client's verified location (pin for maps/routes).
-  /// When [recordHistorial] is true, also appends an audit entry in historial_contacto.
+  /// When [recordHistorial] is true, also appends an audit entry in historial_contacto
+  /// and an event in bitacora_campo (batch atómico).
   Future<void> saveVerifiedLocation({
     required String campaignId,
     required String section,
@@ -877,9 +1231,11 @@ class FirestoreService {
     required String gestorUid,
     required String gestorNombre,
     String? nota,
+    String? usuarioRol,
     bool recordHistorial = false,
   }) async {
-    final nowIso = DateTime.now().toIso8601String();
+    final when = DateTime.now();
+    final nowIso = when.toIso8601String();
     final clientRef = _db
         .collection('campañas')
         .doc(campaignId)
@@ -888,7 +1244,25 @@ class FirestoreService {
         .collection('clientes')
         .doc(clientId);
 
-    await clientRef.update({
+    final clientSnap = await clientRef.get();
+    final clientData = clientSnap.data() ?? <String, dynamic>{};
+    final prev = clientData['ubicacion_verificada'];
+    double? latAnterior;
+    double? lngAnterior;
+    if (prev is Map) {
+      final plat = prev['lat'];
+      final plng = prev['lng'];
+      if (plat is num) latAnterior = plat.toDouble();
+      if (plng is num) lngAnterior = plng.toDouble();
+    }
+
+    final coordLabel =
+        '${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}';
+    final mapsUrl = 'https://www.google.com/maps?q=$lat,$lng';
+    final meta = _metaFromClientData(clientData, clientId);
+
+    final batch = _db.batch();
+    batch.update(clientRef, {
       'ubicacion_verificada': {
         'lat': lat,
         'lng': lng,
@@ -899,42 +1273,109 @@ class FirestoreService {
       },
     });
 
-    if (!recordHistorial) return;
+    if (recordHistorial) {
+      final notaTrim = (nota ?? '').trim();
+      final histRef = clientRef.collection('historial_contacto').doc();
+      final direccionAnterior = (latAnterior != null && lngAnterior != null)
+          ? 'GPS: ${latAnterior.toStringAsFixed(5)}, ${lngAnterior.toStringAsFixed(5)}'
+          : '';
+      batch.set(histRef, {
+        'fecha': nowIso,
+        'fecha_evento': nowIso,
+        'campo': 'ubicacion',
+        'tipo': 'gps_verificado',
+        'direccion_anterior': direccionAnterior,
+        'direccion_nueva': 'GPS: $coordLabel',
+        'telefono_anterior': '',
+        'telefono_nuevo': '',
+        'nota': notaTrim.isNotEmpty
+            ? notaTrim
+            : 'Ubicación GPS verificada en campo ($coordLabel)',
+        'usuario_uid': gestorUid,
+        'usuario_nombre': gestorNombre,
+        'usuario_email': '',
+        'rol_editor': usuarioRol ?? 'gestor',
+        'seccion_key': section,
+        'origen_actualizacion': 'mobile',
+        'usar_como_principal': false,
+        'nivel_confianza': 'confiable',
+        'orden': 0,
+        'oculto': false,
+        'es_principal': false,
+        'gps': {
+          'latitude': lat,
+          'longitude': lng,
+          'accuracy': accuracy ?? 0,
+          'timestamp': nowIso,
+          if (latAnterior != null) 'latitude_anterior': latAnterior,
+          if (lngAnterior != null) 'longitude_anterior': lngAnterior,
+        },
+      });
 
-    final notaTrim = (nota ?? '').trim();
-    final coordLabel =
-        '${lat.toStringAsFixed(5)}, ${lng.toStringAsFixed(5)}';
-    final histRef = clientRef.collection('historial_contacto').doc();
-    await histRef.set({
-      'fecha': nowIso,
-      'fecha_evento': nowIso,
-      'campo': 'ubicacion',
-      'tipo': 'gps_verificado',
-      'direccion_anterior': '',
-      'direccion_nueva': 'GPS: $coordLabel',
-      'telefono_anterior': '',
-      'telefono_nuevo': '',
-      'nota': notaTrim.isNotEmpty
-          ? notaTrim
-          : 'Ubicación GPS verificada en campo ($coordLabel)',
-      'usuario_uid': gestorUid,
-      'usuario_nombre': gestorNombre,
-      'usuario_email': '',
-      'rol_editor': 'gestor',
-      'seccion_key': section,
-      'origen_actualizacion': 'mobile',
-      'usar_como_principal': false,
-      'nivel_confianza': 'confiable',
-      'orden': 0,
-      'oculto': false,
-      'es_principal': false,
-      'gps': {
-        'latitude': lat,
-        'longitude': lng,
-        'accuracy': accuracy ?? 0,
-        'timestamp': nowIso,
-      },
-    });
+      if (gestorUid.isNotEmpty) {
+        final eventId = BitacoraCampoEntry.idUbicacion(histRef.id);
+        batch.set(
+          BitacoraCampoService().docRef(eventId),
+          BitacoraCampoService.buildEventMap(
+            tipo: BitacoraCampoEntry.tipoUbicacion,
+            when: when,
+            campaignId: campaignId,
+            seccionKey: section,
+            clienteId: clientId,
+            clienteNombre: meta.nombre,
+            codigoCliente: meta.codigo,
+            dni: meta.dni,
+            usuarioUid: gestorUid,
+            usuarioNombre: gestorNombre,
+            usuarioRol: usuarioRol ?? 'gestor',
+            resumen: 'GPS verificado: $coordLabel',
+            origenId: histRef.id,
+            origenColeccion: 'historial_contacto',
+            payload: {
+              'lat': lat,
+              'lng': lng,
+              'accuracy': accuracy ?? 0,
+              if (latAnterior != null) 'lat_anterior': latAnterior,
+              if (lngAnterior != null) 'lng_anterior': lngAnterior,
+              'maps_url': mapsUrl,
+            },
+            creadoAtServer: FieldValue.serverTimestamp(),
+          ),
+        );
+      }
+    }
+
+    await batch.commit();
+  }
+
+  Future<_ClientBitacoraMeta> _clientMetaForBitacora(
+    DocumentReference<Map<String, dynamic>> clientRef,
+  ) async {
+    try {
+      final snap = await clientRef.get();
+      return _metaFromClientData(snap.data() ?? {}, clientRef.id);
+    } catch (_) {
+      return _ClientBitacoraMeta(nombre: '', codigo: clientRef.id, dni: '');
+    }
+  }
+
+  _ClientBitacoraMeta _metaFromClientData(
+    Map<String, dynamic> data,
+    String clientId,
+  ) {
+    final nombre = (data['nombre_completo']?.toString() ?? '').trim();
+    final nombres = [
+      data['nombres']?.toString() ?? '',
+      data['apellido_paterno']?.toString() ?? '',
+      data['apellido_materno']?.toString() ?? '',
+    ].where((s) => s.trim().isNotEmpty).join(' ');
+    final codigo = (data['codigo_cliente']?.toString() ?? '').trim();
+    final dni = (data['numero_documento']?.toString() ?? '').trim();
+    return _ClientBitacoraMeta(
+      nombre: nombre.isNotEmpty ? nombre : nombres,
+      codigo: codigo.isNotEmpty ? codigo : clientId,
+      dni: dni,
+    );
   }
 
   // ─────────────────── ZONE EDITING (Admin) ───────────────────
@@ -1032,6 +1473,8 @@ class FirestoreService {
       }
 
       final clientData = Map<String, dynamic>.from(oldDoc.data()!);
+      final isVirtualDest = newSectionKey.startsWith('_CALL_') ||
+          isReservedReassignmentSection(newSectionKey);
       final parsed = _parseSectionComponents(newSectionKey);
 
       final historial = (clientData['historial_zona'] is List)
@@ -1048,11 +1491,20 @@ class FirestoreService {
         'motivo': motivo,
       });
 
-      clientData['seccion'] = parsed['seccion'];
       clientData['seccion_key'] = newSectionKey;
-      clientData['region'] = parsed['region'];
-      clientData['zona'] = parsed['zona'];
       clientData['historial_zona'] = historial;
+      if (!isVirtualDest) {
+        clientData['seccion'] = parsed['seccion'];
+        clientData['region'] = parsed['region'];
+        clientData['zona'] = parsed['zona'];
+      }
+
+      final destCallUid = callSectionUid(newSectionKey);
+      if (destCallUid != null) {
+        clientData['call_gestor_uid'] = destCallUid;
+        clientData['fase_gestion'] = 'call';
+        clientData['call_asignacion_manual'] = true;
+      }
 
       if (resetGestion) {
         clientData['estado_gestion'] = 'pendiente';
@@ -1120,6 +1572,12 @@ class FirestoreService {
   Future<List<Map<String, dynamic>>> listPendingReturns(String campaignId) async {
     final queryResult = await _listPendingReturnsQuery(campaignId);
     if (queryResult != null) return queryResult;
+    if (kIsWeb) {
+      debugPrint(
+        'Pending returns: skipping full section scan on web (too many gestores).',
+      );
+      return [];
+    }
     return _listPendingReturnsScan(campaignId);
   }
 
@@ -1132,7 +1590,8 @@ class FirestoreService {
       final snap = await _db
           .collectionGroup('clientes')
           .where('estado_gestion', isEqualTo: 'devolucion_pendiente')
-          .get();
+          .get()
+          .timeout(const Duration(seconds: 20));
       for (final doc in snap.docs) {
         final path = doc.reference.path.replaceAll('\\', '/');
         if (!path.contains(campaignMarker)) continue;
@@ -1767,9 +2226,13 @@ class FirestoreService {
   }
 
   /// Get all users (canonical docs win over legacy email-keyed duplicates).
+  /// Con timeout para no colgar el panel ejecutivo si Firestore web se atasca.
   Future<List<UserModel>> getUsers() async {
     try {
-      final snapshot = await _db.collection('usuarios').get();
+      final snapshot = await _db
+          .collection('usuarios')
+          .get()
+          .timeout(const Duration(seconds: 20));
       final byUid = <String, ({UserModel user, bool canonical})>{};
       for (final doc in snapshot.docs) {
         final data = doc.data();
@@ -1900,4 +2363,16 @@ class FirestoreService {
       return {};
     }
   }
+}
+
+class _ClientBitacoraMeta {
+  final String nombre;
+  final String codigo;
+  final String dni;
+
+  const _ClientBitacoraMeta({
+    required this.nombre,
+    required this.codigo,
+    required this.dni,
+  });
 }

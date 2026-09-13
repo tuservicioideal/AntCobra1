@@ -12,6 +12,7 @@ class GestorProfileStatsPanel extends StatelessWidget {
   final String? errorMessage;
   final VoidCallback? onRefresh;
   final VoidCallback? onViewFullStats;
+  final ValueChanged<SectionStats>? onSectionTap;
 
   const GestorProfileStatsPanel({
     super.key,
@@ -20,6 +21,7 @@ class GestorProfileStatsPanel extends StatelessWidget {
     this.errorMessage,
     this.onRefresh,
     this.onViewFullStats,
+    this.onSectionTap,
   });
 
   @override
@@ -68,7 +70,7 @@ class GestorProfileStatsPanel extends StatelessWidget {
               const SizedBox(height: 12),
               _buildRutaHoy(),
             ],
-            if (stats.porSeccion.length > 1) ...[
+            if (stats.porSeccion.isNotEmpty) ...[
               const SizedBox(height: 14),
               _buildSectionBreakdown(),
             ],
@@ -279,6 +281,7 @@ class GestorProfileStatsPanel extends StatelessWidget {
   }
 
   Widget _buildSectionBreakdown() {
+    final tappable = onSectionTap != null;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -286,10 +289,17 @@ class GestorProfileStatsPanel extends StatelessWidget {
           'Avance por sección',
           style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
         ),
+        if (tappable) ...[
+          const SizedBox(height: 4),
+          Text(
+            'Toca una sección para armar tu visita.',
+            style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+          ),
+        ],
         const SizedBox(height: 8),
         ...stats.porSeccion.map((s) {
           final pct = s.total > 0 ? s.visitados / s.total : 0.0;
-          return Padding(
+          final row = Padding(
             padding: const EdgeInsets.only(bottom: 8),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -300,7 +310,10 @@ class GestorProfileStatsPanel extends StatelessWidget {
                     Expanded(
                       child: Text(
                         sectionDisplayLabel(s.sectionKey),
-                        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w500),
+                        style: const TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                        ),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
@@ -308,6 +321,14 @@ class GestorProfileStatsPanel extends StatelessWidget {
                       '${s.visitados}/${s.total}',
                       style: TextStyle(color: Colors.grey.shade600, fontSize: 11),
                     ),
+                    if (tappable) ...[
+                      const SizedBox(width: 4),
+                      Icon(
+                        Icons.chevron_right,
+                        size: 18,
+                        color: Colors.grey.shade500,
+                      ),
+                    ],
                   ],
                 ),
                 const SizedBox(height: 4),
@@ -318,12 +339,19 @@ class GestorProfileStatsPanel extends StatelessWidget {
                     minHeight: 6,
                     backgroundColor: Colors.grey.shade200,
                     valueColor: AlwaysStoppedAnimation<Color>(
-                      Color.lerp(Colors.red, Colors.green, pct) ?? AppTheme.primary,
+                      Color.lerp(Colors.red, Colors.green, pct) ??
+                          AppTheme.primary,
                     ),
                   ),
                 ),
               ],
             ),
+          );
+          if (!tappable) return row;
+          return InkWell(
+            onTap: () => onSectionTap!(s),
+            borderRadius: BorderRadius.circular(8),
+            child: row,
           );
         }),
       ],
@@ -338,6 +366,8 @@ class GestorProfileStatsPanel extends StatelessWidget {
       'fallecido_inubicable': 'Inubicable',
       'suplantacion': 'Suplantación',
       'pago_no_registrado': 'Pago no reg.',
+      'no_hizo_pedido': 'No hizo pedido',
+      'completo_pedido_socia': 'Pedido socia',
     };
     return stats.porEstado.entries
         .where((e) => e.value > 0)

@@ -154,7 +154,7 @@ class TeamPage:
 
     def _on_users_loaded(self, gestores):
         self._gestores = [g for g in gestores
-                          if g.get("rol") in ("gestor", "asistente", "supervisor", "admin")]
+                          if g.get("rol") in ("gestor", "asistente", "resolutor", "supervisor", "admin")]
         self._gestor_names = {}
         self._assignments = {}
 
@@ -250,6 +250,7 @@ class TeamPage:
         "admin":       ("#7C3AED", "#F5F3FF", "Admin"),
         "supervisor":  ("#D97706", "#FFFBEB", "Supervisor"),
         "asistente":   ("#0891B2", "#ECFEFF", "Asistente"),
+        "resolutor":   ("#EA580C", "#FFF7ED", "Resolutor"),
         "gestor":      ("#059669", "#ECFDF5", "Gestor"),
     }
 
@@ -524,7 +525,7 @@ class TeamPage:
                      text_color=TEXT_SECONDARY).pack(padx=16, anchor="w", pady=(8, 0))
         role_var = ctk.StringVar(value="gestor")
         role_menu = ctk.CTkOptionMenu(scroll, variable=role_var,
-                          values=["gestor", "asistente", "supervisor", "admin"],
+                          values=["gestor", "asistente", "resolutor", "supervisor", "admin"],
                           font=font(12), height=34, corner_radius=8,
                           fg_color="#F1F5F9", button_color=ACCENT,
                           text_color=TEXT_PRIMARY)
@@ -545,9 +546,84 @@ class TeamPage:
         canal_menu.pack(fill="x", padx=16, pady=(2, 0))
         ctk.CTkLabel(
             canal_wrap,
-            text="Call Center: gestión telefónica tramo 1 (sin sección territorial).",
+            text="Call Center: operador telefónico (código E1-1…E3-1, sin sección territorial).",
             font=font(10), text_color=TEXT_MUTED, wraplength=400, justify="left",
         ).pack(padx=16, anchor="w", pady=(2, 0))
+
+        # ── Código operador call (slots fijos) ────────────────
+        from services.fase_reparto import (
+            CALL_CODIGOS_E1,
+            CALL_CODIGOS_E2,
+            CALL_CODIGOS_E3,
+            CALL_CODIGOS_TODOS,
+            etapa_for_call_codigo,
+            normalize_call_codigo,
+        )
+        _CALL_ETAPA_POOLS = {
+            "Etapa 1 (E1-1 · E1-2 · E1-3)": list(CALL_CODIGOS_E1),
+            "Etapa 2 (E2-1 · E2-2)": list(CALL_CODIGOS_E2),
+            "Etapa 3 (E3-1)": list(CALL_CODIGOS_E3),
+        }
+        call_etapa_var = ctk.StringVar(value="Etapa 1 (E1-1 · E1-2 · E1-3)")
+        call_codigo_var = ctk.StringVar(value="")
+        call_codigo_wrap = ctk.CTkFrame(scroll, fg_color="transparent")
+        ctk.CTkLabel(
+            call_codigo_wrap, text="Etapa call (1, 2 o 3)",
+            font=font(11), text_color=TEXT_SECONDARY,
+        ).pack(padx=16, anchor="w", pady=(8, 0))
+        call_etapa_menu = ctk.CTkOptionMenu(
+            call_codigo_wrap,
+            variable=call_etapa_var,
+            values=list(_CALL_ETAPA_POOLS.keys()),
+            font=font(12), height=34, corner_radius=8,
+            fg_color="#F1F5F9", button_color=ACCENT, text_color=TEXT_PRIMARY,
+        )
+        call_etapa_menu.pack(fill="x", padx=16, pady=(2, 0))
+        ctk.CTkLabel(
+            call_codigo_wrap, text="Código operador call (Operador, no carta)",
+            font=font(11), text_color=TEXT_SECONDARY,
+        ).pack(padx=16, anchor="w", pady=(8, 0))
+        taken_codes = {
+            normalize_call_codigo(g.get("call_codigo"))
+            for g in (self._gestores or [])
+            if g.get("canal") == "call" and g.get("activo", True)
+            and normalize_call_codigo(g.get("call_codigo"))
+        }
+        call_codigo_menu = ctk.CTkOptionMenu(
+            call_codigo_wrap,
+            variable=call_codigo_var,
+            values=["(elige etapa)"],
+            font=font(12), height=34, corner_radius=8,
+            fg_color="#F1F5F9", button_color=ACCENT, text_color=TEXT_PRIMARY,
+        )
+        call_codigo_menu.pack(fill="x", padx=16, pady=(2, 0))
+        call_codigo_hint = ctk.CTkLabel(
+            call_codigo_wrap,
+            text="E1-* = etapa 1 · E2-* = etapa 2 en call · E3-1 = etapa 3 en call. Máx. 6.",
+            font=font(10), text_color=TEXT_MUTED, wraplength=400, justify="left",
+        )
+        call_codigo_hint.pack(padx=16, anchor="w", pady=(2, 0))
+
+        def _refresh_create_call_codes(*_):
+            pool = _CALL_ETAPA_POOLS.get(call_etapa_var.get(), list(CALL_CODIGOS_TODOS))
+            free = [c for c in pool if c not in taken_codes]
+            if free:
+                call_codigo_menu.configure(values=free)
+                call_codigo_var.set(free[0])
+                ocup = [c for c in pool if c in taken_codes]
+                hint = f"E1-* = etapa 1 · E2-* = etapa 2 en call · E3-1 = etapa 3 en call. Máx. 6."
+                if ocup:
+                    hint += f" Ocupados en esta etapa: {', '.join(ocup)}."
+                call_codigo_hint.configure(text=hint)
+            else:
+                call_codigo_menu.configure(values=["(sin slots libres en esta etapa)"])
+                call_codigo_var.set("(sin slots libres en esta etapa)")
+                call_codigo_hint.configure(
+                    text="Etapa completa. Elige otra etapa o libera un código en Equipo."
+                )
+
+        call_etapa_menu.configure(command=_refresh_create_call_codes)
+        _refresh_create_call_codes()
 
         # ── Cascade Section Picker (Multi-select) ─────────────
         sec_wrap = ctk.CTkFrame(scroll, fg_color="transparent")
@@ -555,14 +631,17 @@ class TeamPage:
 
         def _toggle_sec_wrap(*_):
             role = role_var.get()
-            if role in ("admin", "supervisor"):
+            if role in ("admin", "supervisor", "resolutor"):
                 canal_wrap.pack_forget()
+                call_codigo_wrap.pack_forget()
                 sec_wrap.pack_forget()
             elif canal_var.get() == "call":
                 canal_wrap.pack(fill="x")
+                call_codigo_wrap.pack(fill="x")
                 sec_wrap.pack_forget()
             else:
                 canal_wrap.pack(fill="x")
+                call_codigo_wrap.pack_forget()
                 sec_wrap.pack(fill="x")
 
         role_menu.configure(command=_toggle_sec_wrap)
@@ -800,12 +879,19 @@ class TeamPage:
                 msg_lbl.configure(text="Nombre, email y contraseña son obligatorios")
                 return
 
-            is_admin_role = role_var.get() in ("admin", "supervisor")
+            is_admin_role = role_var.get() in ("admin", "supervisor", "resolutor")
             is_call = role_var.get() == "gestor" and canal_var.get() == "call"
 
             if not selected_keys and not is_admin_role and not is_call:
                 msg_lbl.configure(text="Selecciona al menos una sección o ingrésala manualmente")
                 return
+
+            call_codigo = ""
+            if is_call:
+                call_codigo = call_codigo_var.get().strip()
+                if not call_codigo or call_codigo.startswith("("):
+                    msg_lbl.configure(text="Selecciona un código de operador call libre (E1-1…E3-1)")
+                    return
 
             # Derive region/zona/seccion from first selected key for backward compat
             region, zona, seccion = legacy_fields_from_secciones(selected_keys)
@@ -820,6 +906,7 @@ class TeamPage:
                     zona=zona, region=region, rol=role_var.get(),
                     secciones=selected_keys if selected_keys else None,
                     canal=canal_var.get() if role_var.get() == "gestor" else "campo",
+                    call_codigo=call_codigo,
                 )
                 dialog.after(0, lambda: on_result(result))
 
@@ -888,7 +975,7 @@ class TeamPage:
                      text_color=TEXT_SECONDARY).pack(padx=16, anchor="w", pady=(8, 0))
         role_var = ctk.StringVar(value=user_data.get("rol", "gestor"))
         ctk.CTkOptionMenu(scroll, variable=role_var,
-                          values=["gestor", "asistente", "supervisor", "admin"],
+                          values=["gestor", "asistente", "resolutor", "supervisor", "admin"],
                           font=font(12), height=34, corner_radius=8,
                           fg_color="#F1F5F9", button_color=ACCENT,
                           text_color=TEXT_PRIMARY).pack(fill="x", padx=16, pady=(2, 0))
@@ -896,6 +983,99 @@ class TeamPage:
         activo_var = ctk.BooleanVar(value=user_data.get("activo", True))
         ctk.CTkCheckBox(scroll, text="Cuenta activa", variable=activo_var,
                         font=font(12), fg_color=ACCENT).pack(padx=16, pady=(8, 0), anchor="w")
+
+        # ── Etapa + código call (solo gestoras call) ────────────
+        from services.fase_reparto import (
+            CALL_CODIGOS_E1,
+            CALL_CODIGOS_E2,
+            CALL_CODIGOS_E3,
+            CALL_CODIGOS_TODOS,
+            etapa_for_call_codigo,
+            normalize_call_codigo,
+        )
+        _EDIT_ETAPA_POOLS = {
+            "Etapa 1 (E1-1 · E1-2 · E1-3)": list(CALL_CODIGOS_E1),
+            "Etapa 2 (E2-1 · E2-2)": list(CALL_CODIGOS_E2),
+            "Etapa 3 (E3-1)": list(CALL_CODIGOS_E3),
+        }
+        _EDIT_ETAPA_BY_NUM = {
+            1: "Etapa 1 (E1-1 · E1-2 · E1-3)",
+            2: "Etapa 2 (E2-1 · E2-2)",
+            3: "Etapa 3 (E3-1)",
+        }
+        _is_call_edit = (
+            user_data.get("rol") == "gestor" and user_data.get("canal") == "call"
+        )
+        _current_call_code = normalize_call_codigo(user_data.get("call_codigo"))
+        _current_etapa_num = etapa_for_call_codigo(_current_call_code) or 1
+        edit_call_etapa_var = ctk.StringVar(
+            value=_EDIT_ETAPA_BY_NUM.get(_current_etapa_num, "Etapa 1 (E1-1 · E1-2 · E1-3)")
+        )
+        edit_call_codigo_var = ctk.StringVar(value=_current_call_code or "")
+        edit_call_wrap = ctk.CTkFrame(scroll, fg_color="transparent")
+        if _is_call_edit:
+            edit_call_wrap.pack(fill="x")
+        ctk.CTkLabel(
+            edit_call_wrap, text="Etapa call (1, 2 o 3)",
+            font=font(11), text_color=TEXT_SECONDARY,
+        ).pack(padx=16, anchor="w", pady=(8, 0))
+        edit_call_etapa_menu = ctk.CTkOptionMenu(
+            edit_call_wrap, variable=edit_call_etapa_var,
+            values=list(_EDIT_ETAPA_POOLS.keys()),
+            font=font(12), height=34, corner_radius=8,
+            fg_color="#F1F5F9", button_color=ACCENT, text_color=TEXT_PRIMARY,
+        )
+        edit_call_etapa_menu.pack(fill="x", padx=16, pady=(2, 0))
+        ctk.CTkLabel(
+            edit_call_wrap, text="Código operador call (Operador, no carta)",
+            font=font(11), text_color=TEXT_SECONDARY,
+        ).pack(padx=16, anchor="w", pady=(8, 0))
+        edit_call_codigo_menu = ctk.CTkOptionMenu(
+            edit_call_wrap, variable=edit_call_codigo_var,
+            values=[_current_call_code] if _current_call_code else ["(sin código)"],
+            font=font(12), height=34, corner_radius=8,
+            fg_color="#F1F5F9", button_color=ACCENT, text_color=TEXT_PRIMARY,
+        )
+        edit_call_codigo_menu.pack(fill="x", padx=16, pady=(2, 0))
+        edit_call_hint = ctk.CTkLabel(
+            edit_call_wrap,
+            text="Cambiar de etapa mueve su pool de reparto (E1-*, E2-*, E3-1).",
+            font=font(10), text_color=TEXT_MUTED, wraplength=400, justify="left",
+        )
+        edit_call_hint.pack(padx=16, anchor="w", pady=(2, 0))
+
+        def _refresh_edit_call_codes(*_):
+            taken = {
+                normalize_call_codigo(g.get("call_codigo"))
+                for g in (self._gestores or [])
+                if g.get("canal") == "call" and g.get("activo", True)
+                and normalize_call_codigo(g.get("call_codigo"))
+                and (g.get("uid") or g.get("id", "")) != uid
+            }
+            pool = _EDIT_ETAPA_POOLS.get(edit_call_etapa_var.get(), list(CALL_CODIGOS_TODOS))
+            options = [c for c in pool if c not in taken or c == _current_call_code]
+            if _current_call_code and _current_call_code not in options:
+                # El código actual siempre debe poder mantenerse
+                options = [_current_call_code] + options
+            if options:
+                edit_call_codigo_menu.configure(values=options)
+                if edit_call_codigo_var.get() not in options:
+                    edit_call_codigo_var.set(options[0])
+                ocup = [c for c in pool if c in taken and c != _current_call_code]
+                edit_call_hint.configure(
+                    text=(
+                        "Cambiar de etapa mueve su pool de reparto (E1-*, E2-*, E3-1)."
+                        + (f" Ocupados en esta etapa: {', '.join(ocup)}." if ocup else "")
+                    )
+                )
+            else:
+                edit_call_codigo_menu.configure(values=["(etapa completa)"])
+                edit_call_codigo_var.set("(etapa completa)")
+
+        edit_call_etapa_menu.configure(command=_refresh_edit_call_codes)
+        _refresh_edit_call_codes()
+        if _current_call_code:
+            edit_call_codigo_var.set(_current_call_code)
 
         # ── Cascade Section Picker (Multi-select) ─────────────
         separator = ctk.CTkFrame(scroll, height=1, fg_color=BORDER)
@@ -1154,12 +1334,42 @@ class TeamPage:
             if pw:
                 updates["password"] = pw
 
-            # Section updates from multi-select
-            if sorted(selected_keys) != sorted(current_keys):
-                rol = role_var.get()
-                is_call = (
-                    rol == "gestor" and user_data.get("canal", "campo") == "call"
-                )
+            rol = role_var.get()
+            is_call = (
+                rol == "gestor" and user_data.get("canal", "campo") == "call"
+            )
+            if rol in ("admin", "supervisor", "resolutor"):
+                updates["secciones"] = []
+                updates["region"] = ""
+                updates["zona"] = ""
+                updates["seccion"] = ""
+                updates["canal"] = "campo"
+            elif is_call:
+                updates["secciones"] = [f"_CALL_{uid}"]
+                updates["region"] = ""
+                updates["zona"] = ""
+                updates["seccion"] = ""
+                new_code = normalize_call_codigo(edit_call_codigo_var.get())
+                if not new_code or new_code.startswith("("):
+                    msg_lbl.configure(
+                        text="Elige etapa (1, 2 o 3) y un código libre de esa etapa."
+                    )
+                    return
+                taken_other = {
+                    normalize_call_codigo(g.get("call_codigo"))
+                    for g in (self._gestores or [])
+                    if g.get("canal") == "call" and g.get("activo", True)
+                    and normalize_call_codigo(g.get("call_codigo"))
+                    and (g.get("uid") or g.get("id", "")) != uid
+                }
+                if new_code in taken_other:
+                    msg_lbl.configure(
+                        text=f"El código {new_code} ya está ocupado por otra operadora."
+                    )
+                    return
+                if new_code != _current_call_code:
+                    updates["call_codigo"] = new_code
+            elif sorted(selected_keys) != sorted(current_keys):
                 needs_sections = (
                     rol == "asistente"
                     or (rol == "gestor" and not is_call)

@@ -58,6 +58,28 @@ En [Firebase Console](https://console.firebase.google.com/) → proyecto **clase
 - `gestores-clase-001.firebaseapp.com`
 - `localhost` (desarrollo)
 
+## CORS de Firebase Storage (plantillas Word en web)
+
+El portal gestores (`https://gestores-clase-001.web.app`) descarga `plantillas_carta/carta_N.docx` con `getData()`. En el navegador eso exige cabeceras CORS en el bucket. Sin ellas, la consola muestra *blocked by CORS policy* aunque el archivo exista.
+
+Configuración en [`storage-cors.json`](storage-cors.json). Aplicar (una vez, o tras recrear el bucket):
+
+```powershell
+gcloud storage buckets update gs://clase-001.firebasestorage.app --cors-file=storage-cors.json
+```
+
+Comprobar:
+
+```powershell
+curl.exe -sI -H "Origin: https://gestores-clase-001.web.app" "https://firebasestorage.googleapis.com/v0/b/clase-001.firebasestorage.app/o/plantillas_carta%2Fcarta_1.docx?alt=media"
+```
+
+La respuesta 200 debe incluir `Access-Control-Allow-Origin`. Un 403 *sí* puede traer CORS y el navegador lo disfraza igual; el caso real era 200 **sin** esa cabecera.
+
+## Bloqueadores y Firestore (`ERR_BLOCKED_BY_CLIENT`)
+
+`firestore.googleapis.com/.../Listen/channel?TYPE=terminate` bloqueado por uBlock/AdGuard/Brave deja el SDK JS en `INTERNAL ASSERTION FAILED (ca9)`. En web se fuerza long polling y hay recarga única de recuperación. Si persiste: permitir el sitio en el bloqueador.
+
 ## APK en campo
 
 Los gestores en calle deben usar la **APK** (`flutter build apk --release`) para GPS en segundo plano y mejor offline. La web complementa supervisores y uso ocasional desde navegador.

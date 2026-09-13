@@ -2,7 +2,7 @@
 
 import 'territorial_utils.dart';
 
-const validUserRoles = ['gestor', 'asistente', 'supervisor', 'admin'];
+const validUserRoles = ['gestor', 'asistente', 'resolutor', 'supervisor', 'admin'];
 const validCanales = ['campo', 'call'];
 
 class RoleCanal {
@@ -51,7 +51,7 @@ bool isCallGestorRole(String rol, String canal) =>
 bool shouldShowCanalSelector(String rol) => rol == 'gestor';
 
 bool shouldShowTerritorialPicker(String rol, String canal) {
-  if (rol == 'admin' || rol == 'supervisor') return false;
+  if (rol == 'admin' || rol == 'supervisor' || rol == 'resolutor') return false;
   if (isCallGestorRole(rol, canal)) return false;
   return true;
 }
@@ -87,6 +87,15 @@ BuiltSecciones buildSecciones({
       region: finalRegion,
       zona: finalZona,
       seccion: finalSeccion,
+    );
+  }
+
+  if (rol == 'admin' || rol == 'supervisor' || rol == 'resolutor') {
+    return const BuiltSecciones(
+      secciones: [],
+      region: '',
+      zona: '',
+      seccion: '',
     );
   }
 

@@ -28,6 +28,7 @@ from services import update_service
 
 from .theme import *
 from .components import PageFrame
+from . import app_updates
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ NAV_ITEMS = [
     ("callcenter",   "📞", "Call Center"),
     ("reparto",      "🧭", "Plan de Reparto"),
     ("alerts",       "🔔", "Alertas"),
+    ("casos",        "🧩", "Casos"),
     ("returns",      "↩️", "Devoluciones"),
     ("documents",    "📄", "Documentos"),
     ("export",       "📤", "Exportar"),
@@ -61,6 +63,7 @@ _PAGE_FEATURE = {
     "callcenter": "users",
     "reparto":    "monitor",
     "alerts":      "alertas",
+    "casos":       "casos",
     "returns":     "devoluciones",
     "documents":   "letters",
     "export":    "export",
@@ -103,6 +106,8 @@ class App(ctk.CTk):
         self._notif_poll_job: str | None = None
         self._update_firestore_was_empty: bool = False
         self._pending_update_path: str = ""
+        self._update_busy: bool = False
+        self._btn_update = None
 
         self._init_database()
         self._build()
@@ -190,13 +195,14 @@ class App(ctk.CTk):
             command=self._on_logout
         ).pack(side="bottom", fill="x", padx=8, pady=(0, 8))
 
-        ctk.CTkButton(
+        self._btn_update = ctk.CTkButton(
             self._sidebar, text="⬇ Actualizar app",
             font=font(FONT_SCALE['xs']), text_color=SIDEBAR_TEXT,
             fg_color="transparent", hover_color=SIDEBAR_HOVER,
             height=28, corner_radius=6, anchor="center",
             command=self._on_check_updates
-        ).pack(side="bottom", fill="x", padx=8, pady=(0, 2))
+        )
+        self._btn_update.pack(side="bottom", fill="x", padx=8, pady=(0, 2))
         ctk.CTkLabel(
             self._sidebar, text=f"v{APP_VERSION}",
             font=font(FONT_SCALE['xs']), text_color=SIDEBAR_TEXT
@@ -348,7 +354,7 @@ class App(ctk.CTk):
         titles = {
             "inicio": "Inicio", "database": "Base de Datos", "team": "Equipo",
             "callcenter": "Call Center", "reparto": "Plan de Reparto", "tracking": "GPS",
-            "alerts": "Alertas", "returns": "Devoluciones", "documents": "Documentos",
+            "alerts": "Alertas", "casos": "Casos", "returns": "Devoluciones", "documents": "Documentos",
             "export": "Exportar", "sync": "Sincronización",
             "etiquetas": "Etiquetas",
             "settings": "Configuración",
@@ -381,6 +387,7 @@ class App(ctk.CTk):
         from .pages.reparto import RepartoPage
         from .pages.tracking import TrackingPage
         from .pages.alerts import AlertsPage
+        from .pages.casos import CasosPage
         from .pages.returns import ReturnsPage
         from .pages.documents import DocumentsPage
         from .pages.settings import SettingsPage
@@ -397,6 +404,7 @@ class App(ctk.CTk):
             "reparto":    RepartoPage,
             "tracking":  TrackingPage,
             "alerts":    AlertsPage,
+            "casos":     CasosPage,
             "returns":   ReturnsPage,
             "documents": DocumentsPage,
             "export":    ExportPage,
@@ -501,6 +509,7 @@ class App(ctk.CTk):
             "monitor":      ("admin", "supervisor", "asistente"),
             "stats":        ("admin", "supervisor", "asistente"),
             "alertas":      ("admin", "supervisor", "asistente"),
+            "casos":        ("admin", "supervisor", "resolutor"),
             "devoluciones": ("admin", "supervisor"),
             "tracking":     ("admin", "supervisor"),
             "distribucion": ("admin", "supervisor"),
@@ -699,6 +708,8 @@ class App(ctk.CTk):
         if not self.firebase_connected:
             messagebox.showwarning("Firebase", "Conecte Firebase primero.")
             return
+        if not self._confirm_desktop_publish():
+            return
         if not self.active_campaign and not self.parsed_data:
             messagebox.showwarning("Datos", "Cargue un Excel primero.")
             return
@@ -881,11 +892,31 @@ class App(ctk.CTk):
         threading.Thread(target=work, daemon=True).start()
 
     # ── Update Base (new Excel → diff → selective upload → notify) ──
+    def _confirm_desktop_publish(self) -> bool:
+        """Bloquea si hay publicación en curso; avisa si la última fue web."""
+        try:
+            reason = self.firebase.desktop_publish_block_reason()
+        except Exception as exc:
+            messagebox.showerror(
+                "Firebase",
+                f"No se pudo verificar el lock de publicación:\n{exc}",
+            )
+            return False
+        if reason:
+            messagebox.showerror("Publicación", reason)
+            return False
+        warn = self.firebase.desktop_publish_web_warning()
+        if warn and not messagebox.askyesno("Confirmar", f"{warn}\n\n¿Continuar?"):
+            return False
+        return True
+
     def _on_update_base(self):
         """Load a new Excel, compare with current Firestore data,
         show a summary dialog, and upload only the changes."""
         if not self.firebase_connected:
             messagebox.showwarning("Firebase", "Conecte Firebase primero.")
+            return
+        if not self._confirm_desktop_publish():
             return
         if not self.active_campaign:
             messagebox.showwarning("Campaña",
@@ -1293,6 +1324,10 @@ class App(ctk.CTk):
 
     def _on_check_updates(self):
         """Check Hosting manifest and offer download when a newer build exists."""
+        if self._update_busy:
+            return
+        self._update_busy = True
+        self._set_update_busy(True, "Buscando…")
         self.set_status("Buscando actualizaciones…", 0.2)
 
         def work():
@@ -1304,86 +1339,35 @@ class App(ctk.CTk):
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _set_update_busy(self, busy: bool, label: str = "") -> None:
+        self._update_busy = bool(busy)
+        if self._btn_update is None:
+            return
+        if busy:
+            self._btn_update.configure(state="disabled", text=label or "Espere…")
+            return
+        self._btn_update.configure(state="normal", text="⬇ Actualizar app")
+
     def _on_update_error(self, msg: str):
+        self._set_update_busy(False)
         self.set_status("No se pudo comprobar actualizaciones", 0)
-        messagebox.showerror("Actualizaciones", f"No se pudo consultar el servidor:\n{msg}")
+        app_updates.show_message(
+            self,
+            "Actualizaciones",
+            f"No se pudo consultar el servidor:\n{msg}",
+            kind="error",
+        )
 
     def _on_update_info(self, info):
         self.set_status("Listo", 1)
-        if not info.version:
-            messagebox.showwarning("Actualizaciones", "Manifiesto de versión inválido.")
-            return
-        if not info.is_newer:
-            messagebox.showinfo(
-                "Actualizaciones",
-                f"Ya tienes la última versión ({APP_VERSION}).\n"
-                f"Publicada en servidor: {info.version}",
-            )
-            return
-
-        notes = info.notes or "(Sin notas)"
-        if not messagebox.askyesno(
-            "Actualización disponible",
-            f"Hay una nueva versión: {info.version}\n"
-            f"Tu versión: {APP_VERSION}\n\n"
-            f"{notes}\n\n¿Descargar ahora?",
-        ):
-            return
-
-        self.set_status("Descargando actualización…", 0.1)
-
-        def progress(msg, frac):
-            self.after(0, lambda: self.set_status(msg, frac))
-
-        def work():
-            result = update_service.download_update(info, progress=progress)
-            self.after(0, lambda: self._on_update_downloaded(result, info.version))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _on_update_downloaded(self, result, version: str):
-        if not result.success:
-            self.set_status("Error al descargar actualización", 0)
-            messagebox.showerror("Actualizaciones", result.message)
-            return
-
-        self.set_status(result.message, 1)
-        if not result.exe_path:
-            update_service.open_folder(result.folder or result.zip_path)
-            return
-
-        target, used_fallback = update_service.resolve_install_target()
-        extra = ""
-        if used_fallback:
-            extra = (
-                "\n\nSe instalará en LocalAppData\\AntCobranzas "
-                "y se actualizará el acceso directo del Escritorio."
-            )
-        apply_now = messagebox.askyesno(
-            "Descarga completa",
-            f"{result.message}\n\n"
-            f"Versión: {version}\n"
-            f"Se reemplazará la app en:\n{target}"
-            f"{extra}\n\n"
-            "¿Aplicar la actualización ahora?\n"
-            "(Esta ventana se cerrará y la app se abrirá de nuevo.)",
+        started = app_updates.offer_and_install(
+            self,
+            info,
+            busy_cb=self._set_update_busy,
+            status_cb=self.set_status,
         )
-        if not apply_now:
-            update_service.open_folder(result.folder or result.exe_path)
-            return
-        try:
-            applied = update_service.apply_update_inplace(result.exe_path, relaunch=True)
-        except Exception as e:
-            messagebox.showerror("Actualizaciones", f"No se pudo aplicar la actualización:\n{e}")
-            update_service.open_folder(result.folder or result.exe_path)
-            return
-        if not applied.success:
-            messagebox.showerror("Actualizaciones", applied.message)
-            update_service.open_folder(result.folder or result.exe_path)
-            return
-        messagebox.showinfo("Actualizaciones", applied.message)
-        if applied.will_relaunch:
-            self.destroy()
+        if not started:
+            self._set_update_busy(False)
 
     def _invalidate_pages(self):
         """Clear cached page instances so they re-render with fresh data."""
@@ -1409,6 +1393,7 @@ class LoginWindow(ctk.CTk):
         self.firebase = FirebaseService()
         self._firebase_ready = False
         self._firebase_error = ""
+        self._update_busy = False
         self._init_firebase()
         self._build()
 
@@ -1580,6 +1565,9 @@ class LoginWindow(ctk.CTk):
         app.mainloop()
 
     def _on_check_updates(self):
+        if self._update_busy:
+            return
+        self._update_busy = True
         self._btn_update.configure(state="disabled", text="Buscando…")
         self._error_lbl.configure(text="")
 
@@ -1592,87 +1580,29 @@ class LoginWindow(ctk.CTk):
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _on_update_fail(self, msg: str):
+    def _set_update_busy(self, busy: bool, label: str = "") -> None:
+        self._update_busy = bool(busy)
+        if busy:
+            self._btn_update.configure(state="disabled", text=label or "Espere…")
+            return
         self._btn_update.configure(state="normal", text="⬇ Actualizar app")
+
+    def _on_update_fail(self, msg: str):
+        self._set_update_busy(False)
         self._error_lbl.configure(text=f"No se pudo buscar actualización: {msg}")
 
     def _on_update_info(self, info, from_startup: bool = False):
-        self._btn_update.configure(state="normal", text="⬇ Actualizar app")
-        if not info.version:
-            if not from_startup:
-                self._error_lbl.configure(text="Manifiesto de versión inválido.")
+        if from_startup and self._update_busy:
             return
-        if not info.is_newer:
-            if not from_startup:
-                messagebox.showinfo(
-                    "Actualizaciones",
-                    f"Ya tienes la última versión ({APP_VERSION}).\n"
-                    f"Publicada en servidor: {info.version}",
-                )
-            return
-
-        notes = info.notes or "(Sin notas)"
-        if not messagebox.askyesno(
-            "Actualización disponible",
-            f"Hay una nueva versión: {info.version}\n"
-            f"Tu versión: {APP_VERSION}\n\n"
-            f"{notes}\n\n¿Descargar ahora?",
-        ):
-            return
-
-        self._btn_update.configure(state="disabled", text="Descargando…")
-
-        def progress(msg, _frac):
-            self.after(0, lambda: self._btn_update.configure(text=msg[:28]))
-
-        def work():
-            result = update_service.download_update(info, progress=progress)
-            self.after(0, lambda: self._on_update_downloaded(result))
-
-        threading.Thread(target=work, daemon=True).start()
-
-    def _on_update_downloaded(self, result):
-        self._btn_update.configure(state="normal", text="⬇ Actualizar app")
-        if not result.success:
-            self._error_lbl.configure(text=result.message)
-            messagebox.showerror("Actualizaciones", result.message)
-            return
-
-        if not result.exe_path:
-            update_service.open_folder(result.folder or result.zip_path)
-            return
-
-        target, used_fallback = update_service.resolve_install_target()
-        extra = ""
-        if used_fallback:
-            extra = (
-                "\n\nSe instalará en LocalAppData\\AntCobranzas "
-                "y se actualizará el acceso directo del Escritorio."
-            )
-        apply_now = messagebox.askyesno(
-            "Descarga completa",
-            f"{result.message}\n\n"
-            f"Se reemplazará la app en:\n{target}"
-            f"{extra}\n\n"
-            "¿Aplicar la actualización ahora?\n"
-            "(Esta ventana se cerrará y la app se abrirá de nuevo.)",
+        self._update_busy = True
+        started = app_updates.offer_and_install(
+            self,
+            info,
+            from_startup=from_startup,
+            busy_cb=self._set_update_busy,
         )
-        if not apply_now:
-            update_service.open_folder(result.folder or result.exe_path)
-            return
-        try:
-            applied = update_service.apply_update_inplace(result.exe_path, relaunch=True)
-        except Exception as e:
-            messagebox.showerror("Actualizaciones", f"No se pudo aplicar la actualización:\n{e}")
-            update_service.open_folder(result.folder or result.exe_path)
-            return
-        if not applied.success:
-            messagebox.showerror("Actualizaciones", applied.message)
-            update_service.open_folder(result.folder or result.exe_path)
-            return
-        messagebox.showinfo("Actualizaciones", applied.message)
-        if applied.will_relaunch:
-            self.destroy()
+        if not started:
+            self._set_update_busy(False)
 
 
 def _show_login():

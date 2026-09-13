@@ -21,6 +21,8 @@ _STATUS_LABELS = {
     "fallecido_inubicable": "Inubicable",
     "suplantacion": "Suplantación",
     "pago_no_registrado": "Pago N/R",
+    "no_hizo_pedido": "No hizo pedido",
+    "completo_pedido_socia": "Pedido socia",
 }
 
 
@@ -36,6 +38,11 @@ class CallCenterPage:
         self._selected_uid: str | None = None
         self._tree: ttk.Treeview | None = None
         self._client_rows: dict[str, dict] = {}
+        self._all_tree_clients: list[dict] = []
+        self._r6_var: ctk.StringVar | None = None
+        self._e2_var: ctk.StringVar | None = None
+        self._client_search_var: ctk.StringVar | None = None
+        self._role_status: ctk.CTkLabel | None = None
         self._preview_frame: ctk.CTkFrame | None = None
         self._gestor_cards_frame: ctk.CTkFrame | None = None
         self._kpi_labels: dict[str, ctk.CTkLabel] = {}
@@ -59,8 +66,9 @@ class CallCenterPage:
         ctk.CTkLabel(
             hdr,
             text=(
-                "Reparto equitativo tramo 1 (LPT por monto) · "
-                "visualice la cartera de cada operador telefónico"
+                "Reparto por etapa: E1-1 / E1-2 / E1-3 → etapa 1 · "
+                "E2-1 / E2-2 → etapa 2 en call · E3-1 → etapa 3 en call. "
+                "Dentro de cada pool se equilibra por monto (LPT con afinidad)."
             ),
             font=font(FONT_SCALE["sm"]), text_color=TEXT_SECONDARY, wraplength=720, justify="left",
         ).pack(anchor="w", pady=(2, 0))
@@ -97,6 +105,7 @@ class CallCenterPage:
             ).pack(anchor="w", pady=(6, 0))
 
         self._build_kpi_strip(container)
+        self._build_role_config(container)
         self._build_actions(container)
         # Solo se empaqueta al mostrar vista previa (evita hueco vertical).
         self._preview_frame = ctk.CTkFrame(container, fg_color="transparent", height=0)
@@ -143,7 +152,7 @@ class CallCenterPage:
         call_clients = [
             c for c in clients
             if c.get("fase_gestion") == "call"
-            and int(c.get("tramo_actual") or 0) == 1
+            and int(c.get("tramo_actual") or 0) in (1, 2, 3)
             and c.get("activo_en_cartera", True)
         ]
         total = len(call_clients)
@@ -210,6 +219,105 @@ class CallCenterPage:
             val.pack(anchor="w", pady=(2, 0))
             self._kpi_labels[key] = val
 
+    @staticmethod
+    def _role_choice_label(gestor: dict) -> str:
+        uid = gestor.get("uid") or gestor.get("id", "")
+        nombre = gestor.get("nombre") or gestor.get("email") or uid
+        return f"{nombre}|{uid}"
+
+    def _build_role_config(self, parent):
+        card = ctk.CTkFrame(
+            parent, fg_color=CARD_BG, corner_radius=12,
+            border_width=1, border_color=BORDER,
+        )
+        card.pack(fill="x", padx=16, pady=(0, 12))
+        inner = ctk.CTkFrame(card, fg_color="transparent")
+        inner.pack(fill="x", padx=14, pady=12)
+
+        ctk.CTkLabel(
+            inner, text="Plantilla de 6 operadores call",
+            font=font(FONT_SCALE["sm"], "bold"), text_color=TEXT_PRIMARY,
+        ).pack(anchor="w")
+        ctk.CTkLabel(
+            inner,
+            text=(
+                "E1-1 / E1-2 / E1-3 → etapa 1 · "
+                "E2-1 / E2-2 → etapa 2 en call · "
+                "E3-1 → etapa 3 en call. "
+                "Los códigos se asignan al crear el usuario en Equipo."
+            ),
+            font=font(FONT_SCALE["xs"]), text_color=TEXT_SECONDARY,
+            wraplength=760, justify="left",
+        ).pack(anchor="w", pady=(2, 8))
+
+        self._slots_frame = ctk.CTkFrame(inner, fg_color="transparent")
+        self._slots_frame.pack(fill="x")
+        self._role_status = ctk.CTkLabel(
+            inner, text="", font=font(FONT_SCALE["xs"]), text_color=TEXT_MUTED,
+        )
+        self._role_status.pack(anchor="w", pady=(8, 0))
+
+    def _refresh_role_menus(self):
+        """Actualiza la grilla de slots E1-1…E3-1."""
+        from services.fase_reparto import CALL_CODIGOS_TODOS, normalize_call_codigo
+
+        if not hasattr(self, "_slots_frame") or self._slots_frame is None:
+            return
+        for w in self._slots_frame.winfo_children():
+            w.destroy()
+
+        by_code = {
+            normalize_call_codigo(g.get("call_codigo")): g
+            for g in self._call_gestores
+            if normalize_call_codigo(g.get("call_codigo"))
+        }
+        for i, code in enumerate(CALL_CODIGOS_TODOS):
+            g = by_code.get(code)
+            cell = ctk.CTkFrame(
+                self._slots_frame, fg_color="#F8FAFC", corner_radius=8,
+                border_width=1, border_color=BORDER,
+            )
+            cell.grid(row=0, column=i, padx=4, pady=2, sticky="nsew")
+            self._slots_frame.grid_columnconfigure(i, weight=1)
+            ctk.CTkLabel(
+                cell, text=code, font=font(FONT_SCALE["sm"], "bold"),
+                text_color=ACCENT if g else WARNING,
+            ).pack(padx=6, pady=(6, 0))
+            if g:
+                nombre = g.get("nombre") or g.get("email") or ""
+                ctk.CTkLabel(
+                    cell, text=nombre[:18], font=font(FONT_SCALE["xs"]),
+                    text_color=TEXT_PRIMARY,
+                ).pack(padx=6, pady=(0, 6))
+            else:
+                ctk.CTkLabel(
+                    cell, text="Vacante", font=font(FONT_SCALE["xs"]),
+                    text_color=WARNING,
+                ).pack(padx=6, pady=(0, 6))
+
+        faltan = [c for c in CALL_CODIGOS_TODOS if c not in by_code]
+        if self._role_status:
+            if faltan:
+                self._role_status.configure(
+                    text="Faltan operadores: " + ", ".join(faltan) + ". Asígnalos en Equipo.",
+                    text_color=WARNING,
+                )
+            else:
+                self._role_status.configure(
+                    text="Plantilla completa (6/6). El LPT reparte dentro de cada etapa.",
+                    text_color=SUCCESS,
+                )
+
+    def _save_call_roles(self):
+        messagebox.showinfo(
+            "Call Center",
+            "Los códigos de operador se asignan al crear/editar usuarios en Equipo "
+            "(campo call_codigo). Ya no hay roles R6 separados.",
+        )
+
+    def _on_roles_saved(self, errors: list[str]):
+        self._refresh_role_menus()
+
     def _build_actions(self, parent):
         row = ctk.CTkFrame(parent, fg_color=CARD_BG, corner_radius=10,
                            border_width=1, border_color=BORDER)
@@ -219,7 +327,10 @@ class CallCenterPage:
 
         ctk.CTkLabel(
             inner,
-            text="Algoritmo LPT: las cuentas de mayor deuda van al gestor con menor monto acumulado.",
+            text=(
+                "Reparto por etapa: E1-* (etapa 1), E2-* (etapa 2 en call), E3-1 (etapa 3). "
+                "Dentro de cada pool se equilibra por monto (LPT)."
+            ),
             font=font(FONT_SCALE["xs"]), text_color=TEXT_MUTED, wraplength=600, justify="left",
         ).pack(anchor="w", pady=(0, 8))
 
@@ -259,9 +370,8 @@ class CallCenterPage:
                             border_width=1, border_color=BORDER)
         card.pack(fill="x", padx=16, pady=(0, 16))
 
-        hdr = ctk.CTkFrame(card, fg_color=ACCENT_LIGHT, corner_radius=0, height=40)
+        hdr = ctk.CTkFrame(card, fg_color=ACCENT_LIGHT, corner_radius=0)
         hdr.pack(fill="x")
-        hdr.pack_propagate(False)
         hdr_inner = ctk.CTkFrame(hdr, fg_color="transparent")
         hdr_inner.pack(fill="x", padx=16, pady=8)
         self._detail_title = ctk.CTkLabel(
@@ -277,27 +387,40 @@ class CallCenterPage:
             command=self._on_reassign_selected,
         )
         self._reassign_menu.pack(side="right", padx=(8, 0))
-        ctk.CTkLabel(hdr_inner, text="Reasignar a:", font=font(FONT_SCALE["xs"]),
+        ctk.CTkLabel(hdr_inner, text="Mover a:", font=font(FONT_SCALE["xs"]),
                      text_color=TEXT_SECONDARY).pack(side="right")
+
+        search_row = ctk.CTkFrame(card, fg_color="transparent")
+        search_row.pack(fill="x", padx=16, pady=(0, 6))
+        self._client_search_var = ctk.StringVar(value="")
+        search_entry = ctk.CTkEntry(
+            search_row,
+            textvariable=self._client_search_var,
+            placeholder_text="Buscar cliente puntual (código, DNI o nombre)…",
+            height=30, font=font(FONT_SCALE["xs"]),
+        )
+        search_entry.pack(fill="x")
+        search_entry.bind("<KeyRelease>", lambda _e: self._apply_client_filter())
 
         tree_frame = ctk.CTkFrame(card, fg_color="transparent")
         tree_frame.pack(fill="x", padx=8, pady=(0, 12))
 
-        cols = ("codigo", "nombre", "dni", "telefono", "distrito", "estado", "deuda", "promesa")
+        cols = ("codigo", "nombre", "dni", "region", "telefono", "distrito", "estado", "deuda", "promesa")
         self._tree = ttk.Treeview(tree_frame, columns=cols, show="headings", height=8)
         headings = {
             "codigo": ("Código", 90),
-            "nombre": ("Cliente", 180),
+            "nombre": ("Cliente", 170),
             "dni": ("DNI", 90),
+            "region": ("Región", 60),
             "telefono": ("Teléfono", 100),
-            "distrito": ("Distrito", 100),
-            "estado": ("Estado", 100),
+            "distrito": ("Distrito", 90),
+            "estado": ("Estado", 90),
             "deuda": ("Deuda pend.", 95),
-            "promesa": ("Promesa", 90),
+            "promesa": ("Promesa", 80),
         }
         for col, (text, width) in headings.items():
             self._tree.heading(col, text=text)
-            self._tree.column(col, width=width, minwidth=60)
+            self._tree.column(col, width=width, minwidth=50)
         scroll = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
         self._tree.configure(yscrollcommand=scroll.set)
         self._tree.pack(side="left", fill="x", expand=True)
@@ -335,6 +458,7 @@ class CallCenterPage:
         self._render_filtered_kpis()
         self._render_gestor_cards(dashboard.get("gestores", []))
         self._update_reassign_menu()
+        self._refresh_role_menus()
         self._refresh_history()
 
         if self._selected_uid:
@@ -345,7 +469,8 @@ class CallCenterPage:
                 self._select_gestor(first)
 
     def _render_kpis(self, d: dict):
-        self._kpi_labels["total"].configure(text=str(d.get("total_tramo1_call", 0)))
+        total = d.get("total_call", d.get("total_tramo1_call", 0))
+        self._kpi_labels["total"].configure(text=str(total))
         self._kpi_labels["sin_asignar"].configure(text=str(d.get("sin_asignar", 0)))
         self._kpi_labels["monto"].configure(
             text=f"S/ {float(d.get('monto_total_call', 0)):,.0f}",
@@ -442,8 +567,17 @@ class CallCenterPage:
         inner.pack(fill="x", padx=14, pady=12)
 
         nombre = gestor.get("nombre") or gestor.get("email") or uid
-        ctk.CTkLabel(inner, text=nombre, font=font(FONT_SCALE["base"], "bold"),
-                     text_color=TEXT_PRIMARY).pack(anchor="w")
+        from services.fase_reparto import normalize_call_codigo
+        code = normalize_call_codigo(gestor.get("call_codigo")) or stats.get("call_codigo") or ""
+        rol_label = code or "Sin código"
+        title_row = ctk.CTkFrame(inner, fg_color="transparent")
+        title_row.pack(fill="x")
+        ctk.CTkLabel(title_row, text=nombre, font=font(FONT_SCALE["base"], "bold"),
+                     text_color=TEXT_PRIMARY).pack(side="left")
+        ctk.CTkLabel(
+            title_row, text=rol_label,
+            font=font(FONT_SCALE["xs"]), text_color=ACCENT if code else WARNING,
+        ).pack(side="right")
 
         num = int(stats.get("num_cuentas", 0))
         monto = float(stats.get("monto_total", 0))
@@ -501,10 +635,31 @@ class CallCenterPage:
     def _fill_tree(self, clients: list[dict]):
         if not self._tree:
             return
+        self._all_tree_clients = list(clients)
+        self._apply_client_filter()
+
+    def _apply_client_filter(self):
+        if not self._tree:
+            return
+        query = ""
+        if self._client_search_var:
+            query = (self._client_search_var.get() or "").strip().lower()
+        visible = self._all_tree_clients
+        if query:
+            def _match(c: dict) -> bool:
+                blob = " ".join([
+                    str(c.get("codigo_cliente", "")),
+                    str(c.get("nombre", "")),
+                    str(c.get("dni", "")),
+                    str(c.get("telefono", "")),
+                    str(c.get("region", "")),
+                ]).lower()
+                return query in blob
+            visible = [c for c in self._all_tree_clients if _match(c)]
         self._client_rows.clear()
         for item in self._tree.get_children():
             self._tree.delete(item)
-        for c in clients:
+        for c in visible:
             prom = ""
             if c.get("monto_promesa_pago", 0) > 0:
                 prom = f"S/ {c['monto_promesa_pago']:,.0f}"
@@ -516,6 +671,7 @@ class CallCenterPage:
                 c.get("codigo_cliente", ""),
                 (c.get("nombre") or "")[:40],
                 c.get("dni", ""),
+                c.get("region", ""),
                 c.get("telefono", ""),
                 c.get("distrito", ""),
                 _STATUS_LABELS.get(c.get("estado_gestion", ""), c.get("estado_gestion", "")),
@@ -633,7 +789,18 @@ class CallCenterPage:
                 f"Desviación estimada: S/ {result.desviacion_monto:,.2f}"
             ),
             font=font(FONT_SCALE["xs"]), text_color=TEXT_SECONDARY,
-        ).pack(anchor="w", pady=(4, 8))
+        ).pack(anchor="w", pady=(4, 4))
+        buckets = getattr(result, "bucket_counts", None) or {}
+        if buckets:
+            ctk.CTkLabel(
+                inner,
+                text=                    (
+                    f"Por etapa pendiente: E1 {buckets.get('E1', 0)}  ·  "
+                    f"E2 {buckets.get('E2', 0)}  ·  "
+                    f"E3 {buckets.get('E3', 0)}"
+                ),
+                font=font(FONT_SCALE["xs"]), text_color=TEXT_MUTED,
+            ).pack(anchor="w", pady=(0, 8))
 
         for g in result.gestores:
             extra = ""

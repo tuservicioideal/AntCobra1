@@ -1,8 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import '../models/user_model.dart';
+import '../utils/auth_session_policy.dart';
 
 /// Authentication service with multi-source profile resolution.
 /// Prefers canonical `usuarios/{uid}`; never silently treats users as gestores.
@@ -18,6 +21,7 @@ class AuthService extends ChangeNotifier {
   String? _error;
   Future<void>? _profileResolveFuture;
   String? _profileResolveUid;
+  StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? _profileSub;
 
   AuthService() {
     _auth.authStateChanges().listen(_onAuthStateChanged);
@@ -33,41 +37,39 @@ class AuthService extends ChangeNotifier {
   bool get isAdmin => _profile?.isAdmin ?? false;
   bool get isSupervisor => _profile?.isSupervisor ?? false;
   bool get isAsistente => _profile?.isAsistente ?? false;
+  bool get isResolutor => _profile?.isResolutor ?? false;
   bool get canManageUsers => _profile?.canManageUsers ?? false;
+  bool get canManageCasos => _profile?.canManageCasos ?? false;
   bool get canViewStats => _profile?.canViewStats ?? false;
 
   Future<void> _onAuthStateChanged(User? user) async {
+    await _cancelProfileListener();
     _firebaseUser = user;
     if (user != null) {
       await _resolveProfileOnce(user);
     } else {
       _profile = null;
-      _error = null;
+      // Keep `_error` so the login screen can show why the session ended.
     }
     _loading = false;
     notifyListeners();
   }
 
+  Future<void> _cancelProfileListener() async {
+    await _profileSub?.cancel();
+    _profileSub = null;
+  }
+
   Future<DocumentSnapshot<Map<String, dynamic>>?> _safeGetDoc(
     DocumentReference<Map<String, dynamic>> ref,
   ) async {
-    try {
-      return await ref.get().timeout(const Duration(seconds: 15));
-    } catch (e) {
-      debugPrint('Safe get failed (${ref.path}): $e');
-      return null;
-    }
+    return ref.get().timeout(const Duration(seconds: 15));
   }
 
   Future<QuerySnapshot<Map<String, dynamic>>?> _safeQuery(
     Query<Map<String, dynamic>> query,
   ) async {
-    try {
-      return await query.get().timeout(const Duration(seconds: 15));
-    } catch (e) {
-      debugPrint('Safe query failed: $e');
-      return null;
-    }
+    return query.get().timeout(const Duration(seconds: 15));
   }
 
   Future<void> _resolveProfileOnce(User user) {
@@ -82,10 +84,18 @@ class AuthService extends ChangeNotifier {
     return _profileResolveFuture!;
   }
 
-  Future<void> _failIncompleteProfile(String message) async {
-    debugPrint('Incomplete profile: $message');
+  Future<void> _failIncompleteProfile(
+    String message, {
+    ProfileFailureReason reason = ProfileFailureReason.missingProfile,
+  }) async {
+    final signOutUser = shouldSignOutAfterProfileFailure(reason: reason);
+    debugPrint('Incomplete profile: $message (signOut=$signOutUser)');
     _error = message;
     _profile = null;
+    if (!signOutUser) {
+      notifyListeners();
+      return;
+    }
     try {
       await _auth.signOut();
     } catch (e) {
@@ -119,10 +129,39 @@ class AuthService extends ChangeNotifier {
       Map<String, dynamic>? profileData;
       var fromCanonical = false;
 
-      // 1. Direct UID doc (always preferred)
-      final uidDoc = await _safeGetDoc(_db.collection('usuarios').doc(user.uid));
-      if (uidDoc?.exists == true && uidDoc!.data() != null) {
-        profileData = uidDoc.data()!;
+      // Keep a long-lived listen on usuarios/{uid} so the first Firestore op
+      // is not a transient getDoc (that teardown races into assertion ca9 on web).
+      final firstSnap = Completer<DocumentSnapshot<Map<String, dynamic>>>();
+      await _cancelProfileListener();
+      _profileSub = _db.collection('usuarios').doc(user.uid).snapshots().listen(
+        (snap) {
+          if (!firstSnap.isCompleted) {
+            firstSnap.complete(snap);
+            return;
+          }
+          if (_firebaseUser?.uid != user.uid) return;
+          if (!snap.exists || snap.data() == null) return;
+          unawaited(_applyCanonicalProfile(user, snap.data()!));
+        },
+        onError: (Object e, StackTrace st) {
+          debugPrint('Profile listener error: $e');
+          if (!firstSnap.isCompleted) firstSnap.completeError(e, st);
+        },
+      );
+
+      DocumentSnapshot<Map<String, dynamic>> uidDoc;
+      try {
+        uidDoc = await firstSnap.future.timeout(const Duration(seconds: 15));
+      } on TimeoutException {
+        await _failIncompleteProfile(
+          'No se pudo cargar tu perfil. Revisa la conexión e intenta de nuevo.',
+          reason: ProfileFailureReason.loadError,
+        );
+        return;
+      }
+
+      if (uidDoc.exists && uidDoc.data() != null) {
+        profileData = uidDoc.data();
         fromCanonical = true;
       }
 
@@ -167,6 +206,7 @@ class AuthService extends ChangeNotifier {
       if (profileData['activo'] == false) {
         await _failIncompleteProfile(
           'Tu cuenta ha sido desactivada. Contacta al administrador.',
+          reason: ProfileFailureReason.disabled,
         );
         return;
       }
@@ -175,6 +215,7 @@ class AuthService extends ChangeNotifier {
       if (rol.isEmpty) {
         await _failIncompleteProfile(
           'Tu perfil no tiene rol asignado. Contacta al administrador.',
+          reason: ProfileFailureReason.missingRole,
         );
         return;
       }
@@ -197,9 +238,28 @@ class AuthService extends ChangeNotifier {
     } catch (e) {
       debugPrint('Error resolving profile: $e');
       await _failIncompleteProfile(
-        'No se pudo cargar tu perfil. Intenta de nuevo o contacta al administrador.',
+        'No se pudo cargar tu perfil. Revisa la conexión e intenta de nuevo.',
+        reason: ProfileFailureReason.loadError,
       );
     }
+  }
+
+  Future<void> _applyCanonicalProfile(
+    User user,
+    Map<String, dynamic> profileData,
+  ) async {
+    if (profileData['activo'] == false) {
+      await _failIncompleteProfile(
+        'Tu cuenta ha sido desactivada. Contacta al administrador.',
+        reason: ProfileFailureReason.disabled,
+      );
+      return;
+    }
+    final rol = profileData['rol']?.toString().trim() ?? '';
+    if (rol.isEmpty) return;
+    _profile = UserModel.fromMap(user.uid, profileData);
+    _error = null;
+    notifyListeners();
   }
 
   /// Sign in with email and password.
@@ -253,6 +313,7 @@ class AuthService extends ChangeNotifier {
 
   /// Sign out.
   Future<void> signOut() async {
+    await _cancelProfileListener();
     await _auth.signOut();
     _profile = null;
     notifyListeners();

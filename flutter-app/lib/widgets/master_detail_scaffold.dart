@@ -17,7 +17,7 @@ class MasterDetailScaffold extends StatelessWidget {
     required this.master,
     this.detail,
     required this.emptyDetail,
-    this.masterFlex = 2,
+    this.masterFlex = 5,
     this.detailFlex = 3,
   });
 
@@ -40,29 +40,22 @@ class MasterDetailScaffold extends StatelessWidget {
       children: [
         header,
         Expanded(
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Expanded(
-                flex: masterFlex.round(),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(
-                    minWidth: ResponsiveBreakpoints.masterPaneMin,
-                  ),
-                  child: master,
-                ),
-              ),
-              const VerticalDivider(width: 1),
-              Expanded(
-                flex: detailFlex.round(),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(
-                    minWidth: ResponsiveBreakpoints.detailPaneMin,
-                  ),
-                  child: detailPane,
-                ),
-              ),
-            ],
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final widths = ResponsiveBreakpoints.masterDetailWidths(
+                total: constraints.maxWidth,
+                masterFlex: masterFlex,
+                detailFlex: detailFlex,
+              );
+              return Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  SizedBox(width: widths.master, child: master),
+                  const VerticalDivider(width: 1),
+                  SizedBox(width: widths.detail, child: detailPane),
+                ],
+              );
+            },
           ),
         ),
       ],

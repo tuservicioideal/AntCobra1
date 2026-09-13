@@ -1,27 +1,33 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import '../models/notification_model.dart';
+import '../utils/firestore_web_guard.dart';
+import '../utils/stream_memo.dart';
 
 /// Service for reading and managing notifications from Firestore.
 class NotificationService {
   final FirebaseFirestore _db = FirebaseFirestore.instance;
+  final _streamMemo = StreamMemo<String, List<NotificationModel>>();
 
   /// Stream of notifications for a specific user (by UID).
   Stream<List<NotificationModel>> streamNotifications(String uid) {
-    if (uid.isEmpty) return Stream.value([]);
-
-    return _db
-        .collection('notificaciones')
-        .where('destinatario_uid', isEqualTo: uid)
-        .orderBy('fecha', descending: true)
-        .limit(50)
-        .snapshots()
-        .map((snapshot) => snapshot.docs
-            .map((doc) => NotificationModel.fromMap(doc.id, doc.data()))
-            .toList())
-        .handleError((e) {
-      debugPrint('Error streaming notifications: $e');
-      return <NotificationModel>[];
+    return _streamMemo.remember(uid, () {
+      if (uid.isEmpty) {
+        return Stream<List<NotificationModel>>.value(const []);
+      }
+      return _db
+          .collection('notificaciones')
+          .where('destinatario_uid', isEqualTo: uid)
+          .orderBy('fecha', descending: true)
+          .limit(50)
+          .snapshots()
+          .map((snapshot) => snapshot.docs
+              .map((doc) => NotificationModel.fromMap(doc.id, doc.data()))
+              .toList())
+          .handleError((e) {
+        debugPrint('Error streaming notifications: $e');
+        maybeReloadForFirestoreAssertion(e);
+      });
     });
   }
 

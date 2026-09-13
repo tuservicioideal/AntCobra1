@@ -2,9 +2,12 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:provider/provider.dart';
 import 'config/firebase_config.dart';
+import 'utils/firestore_web_guard.dart';
+import 'utils/firestore_web_recovery.dart';
 import 'services/auth_service.dart';
 import 'services/campana_banco_filter_notifier.dart';
 import 'services/connectivity_service.dart';
@@ -12,10 +15,16 @@ import 'services/location_service.dart';
 import 'services/sync_status_service.dart';
 import 'services/tracking_service.dart';
 import 'services/route_refresh_service.dart';
+import 'services/map_visit_candidates_notifier.dart';
+import 'services/shell_tab_intent_notifier.dart';
 import 'app.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  if (kIsWeb) {
+    installFirestoreWebGuard();
+  }
 
   if (!kIsWeb) {
     GoogleFonts.config.allowRuntimeFetching = false;
@@ -24,6 +33,14 @@ void main() async {
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
     debugPrint('FlutterError: ${details.exceptionAsString()}');
+    maybeReloadForFirestoreAssertion(
+      combineErrorSources([details.exceptionAsString(), details.stack]),
+    );
+  };
+
+  WidgetsBinding.instance.platformDispatcher.onError = (error, stack) {
+    maybeReloadForFirestoreAssertion(combineErrorSources([error, stack]));
+    return false;
   };
 
   ErrorWidget.builder = (FlutterErrorDetails details) {
@@ -73,7 +90,17 @@ void main() async {
     options: FirebaseConfig.currentPlatform,
   );
 
-  // Enable Firestore offline persistence (enabled by default on mobile)
+  // Firestore JS can hit INTERNAL ASSERTION FAILED (ca9) when WebChannel
+  // target teardown is interrupted (ad blockers on TYPE=terminate).
+  // Disable persistence and force long polling before any other usage.
+  if (kIsWeb) {
+    FirebaseFirestore.instance.settings = const Settings(
+      persistenceEnabled: false,
+      webExperimentalForceLongPolling: true,
+    );
+  }
+
+  // Offline persistence stays on for mobile; web is configured above.
 
   runApp(
     MultiProvider(
@@ -93,6 +120,8 @@ void main() async {
               previous ?? SyncStatusService(connectivity, tracking),
         ),
         ChangeNotifierProvider(create: (_) => RouteRefreshService()),
+        ChangeNotifierProvider(create: (_) => MapVisitCandidatesNotifier()),
+        ChangeNotifierProvider(create: (_) => ShellTabIntentNotifier()),
       ],
       child: const RecaudoLegalApp(),
     ),

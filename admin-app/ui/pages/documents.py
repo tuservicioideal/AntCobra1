@@ -693,6 +693,7 @@ class DocumentsPage:
                             "visitados": 0, "pagados": 0,
                             "morosos": 0, "no_ubica": 0,
                             "suplantacion": 0, "pago_no_registrado": 0,
+                            "no_hizo_pedido": 0, "completo_pedido_socia": 0,
                         }
                         for c in clients:
                             eg = c.get("estado_gestion", "")
@@ -710,6 +711,12 @@ class DocumentsPage:
                                 counts["visitados"] += 1
                             elif eg == "pago_no_registrado":
                                 counts["pago_no_registrado"] += 1
+                                counts["visitados"] += 1
+                            elif eg == "no_hizo_pedido":
+                                counts["no_hizo_pedido"] += 1
+                                counts["visitados"] += 1
+                            elif eg == "completo_pedido_socia":
+                                counts["completo_pedido_socia"] += 1
                                 counts["visitados"] += 1
                         sec_data.update(counts)
                         secciones_stats.append(sec_data)

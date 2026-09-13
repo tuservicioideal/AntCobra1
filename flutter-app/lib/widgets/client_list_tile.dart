@@ -2,8 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../config/theme.dart';
 import '../models/client_model.dart';
+import '../models/semaforo.dart';
 import '../services/etiqueta_catalog_service.dart';
 import '../utils/client_status_ui.dart';
+import 'cierre_badge.dart';
+import 'tramo_filter_bar.dart';
 
 /// List tile for a client in the dashboard.
 class ClientListTile extends StatelessWidget {
@@ -11,10 +14,12 @@ class ClientListTile extends StatelessWidget {
   final VoidCallback onTap;
   final String? distanceLabel;
   final bool isCallMode;
-  final bool showCampanaBadge;
   final bool isSelected;
   final bool showChevron;
+  final bool dense;
+  final Widget? trailing;
   final EtiquetaCatalogService? etiquetaCatalog;
+  final int duracionDias;
 
   const ClientListTile({
     super.key,
@@ -22,10 +27,12 @@ class ClientListTile extends StatelessWidget {
     required this.onTap,
     this.distanceLabel,
     this.isCallMode = false,
-    this.showCampanaBadge = false,
     this.isSelected = false,
     this.showChevron = true,
+    this.dense = false,
+    this.trailing,
     this.etiquetaCatalog,
+    this.duracionDias = 59,
   });
 
   @override
@@ -33,10 +40,13 @@ class ClientListTile extends StatelessWidget {
     final statusColor = AppTheme.getStatusColor(client.estadoGestion);
 
     return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      margin: EdgeInsets.symmetric(
+        horizontal: dense ? 8 : 16,
+        vertical: dense ? 2 : 4,
+      ),
       elevation: isSelected ? 2 : 0,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
+        borderRadius: BorderRadius.circular(dense ? 10 : 14),
         side: BorderSide(
           color: isSelected ? AppTheme.primaryColor : Colors.transparent,
           width: isSelected ? 2 : 0,
@@ -45,13 +55,14 @@ class ClientListTile extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         mouseCursor: SystemMouseCursors.click,
-        borderRadius: BorderRadius.circular(14),        child: Padding(
-          padding: const EdgeInsets.all(12),
+        borderRadius: BorderRadius.circular(dense ? 10 : 14),
+        child: Padding(
+          padding: EdgeInsets.all(dense ? 8 : 12),
           child: Row(
             children: [
               // Avatar with initials
               CircleAvatar(
-                radius: 22,
+                radius: dense ? 16 : 22,
                 backgroundColor: statusColor.withValues(alpha: 0.12),
                 child: Text(
                   client.initials,
@@ -71,6 +82,29 @@ class ClientListTile extends StatelessWidget {
                   children: [
                     Row(
                       children: [
+                        TramoBadge(
+                          tramo: client.tramoActual,
+                          dense: true,
+                        ),
+                        if (normalizeSemaforo(client.semaforo).isNotEmpty) ...[
+                          const SizedBox(width: 6),
+                          Tooltip(
+                            message: labelSemaforo(client.semaforo),
+                            child: Container(
+                              width: 10,
+                              height: 10,
+                              decoration: BoxDecoration(
+                                color: colorSemaforo(client.semaforo),
+                                shape: BoxShape.circle,
+                                border: Border.all(
+                                  color: Colors.white,
+                                  width: 1,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                        const SizedBox(width: 6),
                         Expanded(
                           child: Text(
                             client.displayName,
@@ -121,7 +155,7 @@ class ClientListTile extends StatelessWidget {
                             color: Colors.grey.shade600,
                           ),
                         ),
-                        if (showCampanaBadge && client.campanaBanco.isNotEmpty) ...[
+                        if (client.campanaBanco.isNotEmpty) ...[
                           const SizedBox(width: 8),
                           Container(
                             padding: const EdgeInsets.symmetric(
@@ -143,7 +177,14 @@ class ClientListTile extends StatelessWidget {
                           ),
                         ],
                         const SizedBox(width: 8),
-                        if (client.distrito.isNotEmpty)
+                        CierreBadge(
+                          client: client,
+                          now: DateTime.now(),
+                          duracionDias: duracionDias,
+                          dense: true,
+                        ),
+                        if (client.distrito.isNotEmpty) ...[
+                          const SizedBox(width: 8),
                           Expanded(
                             child: Text(
                               client.distrito,
@@ -155,6 +196,8 @@ class ClientListTile extends StatelessWidget {
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
+                        ] else
+                          const Spacer(),
                       ],
                     ),
                     if (isCallMode && client.hasPhone) ...[
@@ -308,8 +351,11 @@ class ClientListTile extends StatelessWidget {
               ),
 
               const SizedBox(width: 4),
-              if (showChevron)
-                Icon(Icons.chevron_right, size: 18, color: Colors.grey.shade400),            ],
+              if (trailing != null)
+                trailing!
+              else if (showChevron)
+                Icon(Icons.chevron_right, size: 18, color: Colors.grey.shade400),
+            ],
           ),
         ),
       ),
@@ -334,11 +380,120 @@ class ClientListTile extends StatelessWidget {
         return 'SUPLANT.';
       case 'pago_no_registrado':
         return 'PAGO N/R';
+      case 'no_hizo_pedido':
+        return 'SIN PEDIDO';
+      case 'completo_pedido_socia':
+        return 'PED. SOCIA';
       case 'pendiente':
         return 'PENDIENTE';
       default:
         return estado.toUpperCase();
     }
+  }
+}
+
+/// Shared column spec so header and rows stay aligned.
+abstract final class ClientTableCols {
+  static const clienteFlex = 4;
+  static const dniFlex = 2;
+  static const phoneFlex = 2;
+  static const campanaWidth = 72.0;
+  static const atrasoWidth = 52.0;
+  static const cierreWidth = 72.0;
+  static const deudaWidth = 76.0;
+  static const estadoWidth = 80.0;
+  static const distanciaWidth = 72.0;
+}
+
+class _ColLabel extends StatelessWidget {
+  final String text;
+  final TextAlign align;
+
+  const _ColLabel(this.text, {this.align = TextAlign.start});
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      text,
+      textAlign: align,
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 11),
+    );
+  }
+}
+
+/// Header row for [ClientDataRow] tables.
+class ClientTableHeader extends StatelessWidget {
+  final bool isCallMode;
+  final bool showCampana;
+  final bool showAtraso;
+  final bool showCierre;
+  final bool showDistance;
+
+  const ClientTableHeader({
+    super.key,
+    this.isCallMode = false,
+    this.showCampana = true,
+    this.showAtraso = true,
+    this.showCierre = false,
+    this.showDistance = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      color: Colors.grey.shade100,
+      child: Row(
+        children: [
+          const Expanded(
+            flex: ClientTableCols.clienteFlex,
+            child: _ColLabel('Cliente'),
+          ),
+          const Expanded(
+            flex: ClientTableCols.dniFlex,
+            child: _ColLabel('DNI'),
+          ),
+          if (isCallMode)
+            const Expanded(
+              flex: ClientTableCols.phoneFlex,
+              child: _ColLabel('Teléfono'),
+            ),
+          if (showCampana)
+            const SizedBox(
+              width: ClientTableCols.campanaWidth,
+              child: _ColLabel('Campaña'),
+            ),
+          if (showAtraso)
+            const SizedBox(
+              width: ClientTableCols.atrasoWidth,
+              child: _ColLabel('Atraso', align: TextAlign.end),
+            ),
+          if (showCierre)
+            const SizedBox(
+              width: ClientTableCols.cierreWidth,
+              child: _ColLabel('Cierre', align: TextAlign.end),
+            ),
+          const SizedBox(
+            width: ClientTableCols.deudaWidth,
+            child: _ColLabel('Deuda', align: TextAlign.end),
+          ),
+          const SizedBox(width: 8),
+          const SizedBox(
+            width: ClientTableCols.estadoWidth,
+            child: _ColLabel('Estado', align: TextAlign.end),
+          ),
+          if (showDistance) ...[
+            const SizedBox(width: 8),
+            const SizedBox(
+              width: ClientTableCols.distanciaWidth,
+              child: _ColLabel('Dist.', align: TextAlign.end),
+            ),
+          ],
+        ],
+      ),
+    );
   }
 }
 
@@ -349,6 +504,11 @@ class ClientDataRow extends StatelessWidget {
   final String? distanceLabel;
   final bool isCallMode;
   final bool isSelected;
+  final bool showCampana;
+  final bool showAtraso;
+  final bool showCierre;
+  final int duracionDias;
+  final EtiquetaCatalogService? etiquetaCatalog;
 
   const ClientDataRow({
     super.key,
@@ -357,6 +517,11 @@ class ClientDataRow extends StatelessWidget {
     this.distanceLabel,
     this.isCallMode = false,
     this.isSelected = false,
+    this.showCampana = true,
+    this.showAtraso = true,
+    this.showCierre = false,
+    this.duracionDias = 59,
+    this.etiquetaCatalog,
   });
 
   @override
@@ -370,39 +535,171 @@ class ClientDataRow extends StatelessWidget {
         onTap: onTap,
         mouseCursor: SystemMouseCursors.click,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
           child: Row(
             children: [
               Expanded(
-                flex: 3,
-                child: Text(
-                  client.displayName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                flex: ClientTableCols.clienteFlex,
+                child: Row(
+                  children: [
+                    TramoBadge(
+                      tramo: client.tramoActual,
+                      dense: true,
+                    ),
+                    if (normalizeSemaforo(client.semaforo).isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      Tooltip(
+                        message: labelSemaforo(client.semaforo),
+                        child: Container(
+                          width: 9,
+                          height: 9,
+                          decoration: BoxDecoration(
+                            color: colorSemaforo(client.semaforo),
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.white, width: 1),
+                          ),
+                        ),
+                      ),
+                    ],
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(
+                        client.displayName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                    if (client.isHighValue) ...[
+                      const SizedBox(width: 6),
+                      Text(
+                        'ALTO',
+                        style: TextStyle(
+                          fontSize: 9,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.red.shade600,
+                        ),
+                      ),
+                    ],
+                    if (client.etiquetas.isNotEmpty) ...[
+                      const SizedBox(width: 6),
+                      ...client.etiquetas.take(3).map((id) {
+                        final color =
+                            etiquetaCatalog?.findById(id)?.color ?? Colors.grey;
+                        return Padding(
+                          padding: const EdgeInsets.only(right: 3),
+                          child: Container(
+                            width: 7,
+                            height: 7,
+                            decoration: BoxDecoration(
+                              color: color,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        );
+                      }),
+                    ],
+                  ],
                 ),
               ),
               Expanded(
-                flex: 2,
+                flex: ClientTableCols.dniFlex,
                 child: Text(
-                  isCallMode && client.hasPhone
-                      ? client.telefonoMovil
-                      : client.numeroDocumento,
+                  client.numeroDocumento.isEmpty ? '—' : client.numeroDocumento,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey.shade700,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
                 ),
               ),
-              Expanded(
+              if (isCallMode)
+                Expanded(
+                  flex: ClientTableCols.phoneFlex,
+                  child: client.hasPhone
+                      ? GestureDetector(
+                          onTap: () => _dialPhone(client.telefonoMovil),
+                          child: Text(
+                            client.telefonoMovil,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: AppTheme.primaryColor,
+                            ),
+                          ),
+                        )
+                      : Text(
+                          '—',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: Colors.grey.shade500,
+                          ),
+                        ),
+                ),
+              if (showCampana)
+                SizedBox(
+                  width: ClientTableCols.campanaWidth,
+                  child: Text(
+                    client.campanaBanco.isEmpty ? '—' : client.campanaBanco,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade700),
+                  ),
+                ),
+              if (showAtraso)
+                SizedBox(
+                  width: ClientTableCols.atrasoWidth,
+                  child: Text(
+                    '${client.diasAtraso}d',
+                    textAlign: TextAlign.end,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: client.diasAtraso >= 60
+                          ? Colors.red.shade700
+                          : Colors.grey.shade700,
+                    ),
+                  ),
+                ),
+              if (showCierre)
+                SizedBox(
+                  width: ClientTableCols.cierreWidth,
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: CierreBadge(
+                      client: client,
+                      now: DateTime.now(),
+                      duracionDias: duracionDias,
+                      dense: true,
+                    ),
+                  ),
+                ),
+              SizedBox(
+                width: ClientTableCols.deudaWidth,
                 child: Text(
                   'S/ ${client.importeDeudaAsignada.toStringAsFixed(0)}',
                   textAlign: TextAlign.end,
-                  style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 12),
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 12,
+                    color: client.isHighValue
+                        ? Colors.red.shade600
+                        : Colors.grey.shade800,
+                  ),
                 ),
               ),
               const SizedBox(width: 8),
               SizedBox(
-                width: 88,
+                width: ClientTableCols.estadoWidth,
                 child: Text(
                   clientStatusLabel(client.estadoGestion),
                   maxLines: 1,
@@ -418,7 +715,7 @@ class ClientDataRow extends StatelessWidget {
               if (distanceLabel != null) ...[
                 const SizedBox(width: 8),
                 SizedBox(
-                  width: 72,
+                  width: ClientTableCols.distanciaWidth,
                   child: Text(
                     distanceLabel!,
                     maxLines: 1,
@@ -433,5 +730,11 @@ class ClientDataRow extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _dialPhone(String phone) async {
+    final normalized = phone.replaceAll(RegExp(r'[^\d+]'), '');
+    final uri = Uri(scheme: 'tel', path: normalized);
+    await launchUrl(uri);
   }
 }

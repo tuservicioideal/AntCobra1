@@ -4,7 +4,7 @@ import '../../config/theme.dart';
 import '../../models/client_model.dart';
 import '../../utils/client_display_format.dart';
 import '../../utils/direcciones_conocidas.dart';
-import '../../utils/phone_contact_launcher.dart';
+import '../../utils/whatsapp_send_helper.dart';
 import 'client_detail_contact_agenda_section.dart';
 import 'detail_section_tile.dart';
 
@@ -285,9 +285,9 @@ class _ClientDetailLocationSectionState extends State<ClientDetailLocationSectio
   }
 
   Future<void> _openWhatsApp(BuildContext context, ClientModel client) async {
-    final launched = await launchWhatsApp(
-      phone: client.telefonoMovil,
-      clientName: client.displayName,
+    final launched = await openWhatsAppWithPlantilla(
+      context: context,
+      client: client,
     );
     if (!context.mounted || launched) return;
     ScaffoldMessenger.of(context).showSnackBar(

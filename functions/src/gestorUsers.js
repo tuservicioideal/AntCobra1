@@ -2,7 +2,7 @@ const { getAuth } = require("firebase-admin/auth");
 const { getFirestore, FieldValue } = require("firebase-admin/firestore");
 const { HttpsError } = require("firebase-functions/v2/https");
 
-const VALID_ROLES = ["gestor", "asistente", "supervisor", "admin"];
+const VALID_ROLES = ["gestor", "asistente", "resolutor", "supervisor", "admin"];
 const VALID_CANALES = ["campo", "call"];
 
 /**
@@ -85,6 +85,15 @@ function buildSecciones({
     };
   }
 
+  if (rol === "admin" || rol === "supervisor" || rol === "resolutor") {
+    return {
+      secciones: [],
+      region: "",
+      zona: "",
+      seccion: "",
+    };
+  }
+
   if (Array.isArray(secciones) && secciones.length > 0) {
     finalSecciones = [...new Set(secciones.map((s) => String(s).trim()).filter(Boolean))].sort();
     if (finalSecciones.length > 0) {
@@ -145,6 +154,19 @@ async function createGestorUserHandler(request) {
 
   const isCallGestor = rol === "gestor" && canal === "call";
   const needsSections = (rol === "gestor" && !isCallGestor) || rol === "asistente";
+  const CALL_CODIGOS = ["E1-1", "E1-2", "E1-3", "E2-1", "E2-2", "E3-1"];
+  const CALL_SLOTS_MAX = 6;
+  let callCodigo = String(data.call_codigo || "").trim().toUpperCase().replace(/_/g, "-");
+  if (isCallGestor) {
+    if (!CALL_CODIGOS.includes(callCodigo)) {
+      throw new HttpsError(
+        "invalid-argument",
+        `Debe asignar un código de operador call (${CALL_CODIGOS.join(", ")}).`
+      );
+    }
+  } else {
+    callCodigo = "";
+  }
 
   const preBuild = buildSecciones({
     rol,
@@ -165,6 +187,34 @@ async function createGestorUserHandler(request) {
 
   const auth = getAuth();
   const db = getFirestore();
+
+  if (isCallGestor) {
+    const snap = await db.collection("usuarios").get();
+    const callUsers = [];
+    snap.forEach((doc) => {
+      const u = doc.data() || {};
+      if (u.rol === "gestor" && u.canal === "call" && u.activo !== false) {
+        callUsers.push(u);
+      }
+    });
+    if (callUsers.length >= CALL_SLOTS_MAX) {
+      throw new HttpsError(
+        "failed-precondition",
+        `Ya hay ${CALL_SLOTS_MAX} operadores call activos.`
+      );
+    }
+    const taken = new Set(
+      callUsers
+        .map((u) => String(u.call_codigo || "").trim().toUpperCase())
+        .filter((c) => CALL_CODIGOS.includes(c))
+    );
+    if (taken.has(callCodigo)) {
+      throw new HttpsError(
+        "already-exists",
+        `El código ${callCodigo} ya está asignado a otro operador.`
+      );
+    }
+  }
 
   try {
     const userRecord = await auth.createUser({
@@ -197,11 +247,17 @@ async function createGestorUserHandler(request) {
       uid: userRecord.uid,
       fecha_creacion: FieldValue.serverTimestamp(),
     };
+    if (callCodigo) {
+      profileData.call_codigo = callCodigo;
+    }
 
     await db.collection("usuarios").doc(userRecord.uid).set(profileData);
 
     return { uid: userRecord.uid, success: true };
   } catch (err) {
+    if (err instanceof HttpsError) {
+      throw err;
+    }
     const code = err.code || "";
     if (code === "auth/email-already-exists") {
       throw new HttpsError(
@@ -237,6 +293,76 @@ async function updateGestorUserHandler(request) {
 
   const auth = getAuth();
   const db = getFirestore();
+
+  // Normalizar call_codigo si viene en el payload (E1-1…E3-1, con etapa 1/2/3).
+  const CALL_CODIGOS = ["E1-1", "E1-2", "E1-3", "E2-1", "E2-2", "E3-1"];
+  if (updates.call_codigo !== undefined) {
+    updates.call_codigo = String(updates.call_codigo || "")
+      .trim()
+      .toUpperCase()
+      .replace(/_/g, "-");
+  }
+
+  // Validar cambios de etapa/código call contra duplicados y catálogo.
+  const wantsCallFields =
+    updates.call_codigo !== undefined ||
+    updates.canal !== undefined ||
+    updates.rol !== undefined ||
+    updates.activo !== undefined;
+  if (wantsCallFields) {
+    const currentDoc = await db.collection("usuarios").doc(uid).get();
+    const current = currentDoc.exists ? currentDoc.data() || {} : {};
+    const effRol = updates.rol !== undefined ? updates.rol : current.rol;
+    const effCanal = updates.canal !== undefined ? updates.canal : current.canal;
+    if (effRol === "gestor" && effCanal === "call") {
+      const effCode =
+        updates.call_codigo !== undefined
+          ? updates.call_codigo
+          : String(current.call_codigo || "").trim().toUpperCase();
+      if (!CALL_CODIGOS.includes(effCode)) {
+        throw new HttpsError(
+          "invalid-argument",
+          `Debe asignar etapa (1, 2 o 3) y código call válido (${CALL_CODIGOS.join(", ")}).`
+        );
+      }
+      updates.call_codigo = effCode;
+      const snap = await db.collection("usuarios").get();
+      let activeCallCount = 0;
+      const taken = new Set();
+      snap.forEach((doc) => {
+        if (doc.id === uid) return;
+        const u = doc.data() || {};
+        if ((u.uid || "") === uid) return;
+        if (u.rol === "gestor" && u.canal === "call" && u.activo !== false) {
+          activeCallCount += 1;
+          const c = String(u.call_codigo || "").trim().toUpperCase();
+          if (CALL_CODIGOS.includes(c)) taken.add(c);
+        }
+      });
+      const wasActiveCall =
+        current.rol === "gestor" && current.canal === "call" && current.activo !== false;
+      const willBeActive =
+        (updates.activo !== undefined ? updates.activo !== false : true) &&
+        effRol === "gestor" &&
+        effCanal === "call";
+      if (!wasActiveCall && willBeActive && activeCallCount >= 6) {
+        throw new HttpsError(
+          "failed-precondition",
+          "Ya hay 6 operadores call activos."
+        );
+      }
+      const prevCode = String(current.call_codigo || "").trim().toUpperCase();
+      if (effCode !== prevCode && taken.has(effCode)) {
+        throw new HttpsError(
+          "already-exists",
+          `El código ${effCode} ya está asignado a otra operadora.`
+        );
+      }
+    } else if (updates.call_codigo && updates.call_codigo !== "") {
+      // Al salir de call se limpia el código
+      updates.call_codigo = "";
+    }
+  }
 
   const authUpdates = {};
   if (updates.nombre !== undefined) {

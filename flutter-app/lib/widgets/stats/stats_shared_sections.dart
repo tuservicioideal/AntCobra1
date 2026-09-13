@@ -8,7 +8,9 @@ import '../../models/campaign_stats.dart';
 import '../../models/client_model.dart';
 import '../../utils/responsive.dart';
 import '../../utils/stats_format.dart';
+import '../../utils/tramo_filter.dart';
 import '../stat_card.dart';
+import '../tramo_filter_bar.dart';
 import 'stats_gauge_card.dart';
 import 'stats_pie_chart.dart';
 
@@ -378,6 +380,16 @@ class StatsPieChartCard extends StatelessWidget {
         counts['pago_no_registrado'] ?? 0,
         AppTheme.statusPagoNoRegistrado,
       ),
+      StatsPieEntry(
+        'No hizo pedido',
+        counts['no_hizo_pedido'] ?? 0,
+        AppTheme.statusNoHizoPedido,
+      ),
+      StatsPieEntry(
+        'Pedido socia',
+        counts['completo_pedido_socia'] ?? 0,
+        AppTheme.statusCompletoPedidoSocia,
+      ),
     ];
 
     if (entries.every((e) => e.value == 0)) return const SizedBox.shrink();
@@ -458,19 +470,66 @@ class StatsTramoBarsCard extends StatelessWidget {
 }
 
 /// Tramo chips bar (E1/E2/E3) from client list — used in gestor dashboard.
+/// If [onTramoTap] is set, tapping a chip filters the cartera by that etapa.
 class TramoProgressBar extends StatelessWidget {
   final List<ClientModel> clients;
+  final bool compact;
+  final Set<int> selectedTramos;
+  final ValueChanged<int>? onTramoTap;
 
-  const TramoProgressBar({super.key, required this.clients});
+  const TramoProgressBar({
+    super.key,
+    required this.clients,
+    this.compact = false,
+    this.selectedTramos = const {},
+    this.onTramoTap,
+  });
 
   @override
   Widget build(BuildContext context) {
     final active = clients.where((c) => c.isActiveForGestor).toList();
-    final e1 = active.where((c) => c.tramoActual == 1).length;
-    final e2 = active.where((c) => c.tramoActual == 2).length;
-    final e3 = active.where((c) => c.tramoActual == 3).length;
     final especial = active.where((c) => c.isGestionEspecialSection).length;
     final total = active.length;
+    final filterBar = onTramoTap == null
+        ? null
+        : TramoFilterBar(
+            clients: active,
+            selected: selectedTramos,
+            onTap: onTramoTap!,
+            compact: compact,
+            expandedCards: !compact,
+            keyPrefix: compact ? 'tramo-filter-compact' : 'tramo-filter',
+          );
+
+    if (compact) {
+      if (filterBar != null) {
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            filterBar,
+            if (especial > 0) ...[
+              const SizedBox(width: 6),
+              _compactChip('Esp.', especial, AppTheme.warning),
+            ],
+          ],
+        );
+      }
+      final counts = countByTramo(active);
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _compactChip('E1', counts[1] ?? 0, AppTheme.primaryColor),
+          const SizedBox(width: 6),
+          _compactChip('E2', counts[2] ?? 0, AppTheme.accentColor),
+          const SizedBox(width: 6),
+          _compactChip('E3', counts[3] ?? 0, AppTheme.warning),
+          if (especial > 0) ...[
+            const SizedBox(width: 6),
+            _compactChip('Esp.', especial, AppTheme.warning),
+          ],
+        ],
+      );
+    }
 
     return Container(
       margin: const EdgeInsets.fromLTRB(16, 12, 16, 4),
@@ -491,18 +550,23 @@ class TramoProgressBar extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Text(
-                'Cartera por etapa (ciclo 59 días/cuenta)',
-                style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13,
-                  color: AppTheme.textPrimary,
+              Expanded(
+                child: Text(
+                  onTramoTap == null
+                      ? 'Cartera por etapa'
+                      : 'Filtrar por etapa',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
+                    color: AppTheme.textPrimary,
+                  ),
                 ),
               ),
               Text(
-                '$total activas',
+                selectedTramos.isEmpty
+                    ? '$total activas'
+                    : '${tramoLabel(selectedTramos.first)} · $total activas',
                 style: TextStyle(
                   color: Colors.grey.shade700,
                   fontWeight: FontWeight.w500,
@@ -511,21 +575,53 @@ class TramoProgressBar extends StatelessWidget {
               ),
             ],
           ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              _etapaChip('E1', e1, AppTheme.primaryColor),
-              const SizedBox(width: 8),
-              _etapaChip('E2', e2, AppTheme.accentColor),
-              const SizedBox(width: 8),
-              _etapaChip('E3', e3, AppTheme.warning),
-              if (especial > 0) ...[
-                const SizedBox(width: 8),
-                _etapaChip('Esp.', especial, AppTheme.warning),
-              ],
-            ],
+          const SizedBox(height: 4),
+          Text(
+            onTramoTap == null
+                ? 'Cartera por etapa (ciclo 59 días/cuenta)'
+                : 'Toque E1, E2 o E3 para ver solo esa etapa. Toque de nuevo para ver todas.',
+            style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
           ),
+          const SizedBox(height: 10),
+          if (filterBar != null)
+            filterBar
+          else
+            Row(
+              children: [
+                _etapaChip('E1', countByTramo(active)[1] ?? 0, AppTheme.primaryColor),
+                const SizedBox(width: 8),
+                _etapaChip('E2', countByTramo(active)[2] ?? 0, AppTheme.accentColor),
+                const SizedBox(width: 8),
+                _etapaChip('E3', countByTramo(active)[3] ?? 0, AppTheme.warning),
+              ],
+            ),
+          if (especial > 0) ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: _compactChip('Esp.', especial, AppTheme.warning),
+            ),
+          ],
         ],
+      ),
+    );
+  }
+
+  Widget _compactChip(String label, int count, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: color.withValues(alpha: 0.22)),
+      ),
+      child: Text(
+        '$label $count',
+        style: TextStyle(
+          fontSize: 11,
+          fontWeight: FontWeight.w600,
+          color: color,
+        ),
       ),
     );
   }

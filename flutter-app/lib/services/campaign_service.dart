@@ -1,6 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
+import '../utils/section_load_utils.dart';
+
 /// Discovers the active campaign from Firestore.
 /// Mirrors campaignUtils.js: checks 'cartera_activa' first, then
 /// falls back to latest CAM_* document by ID.
@@ -51,9 +53,14 @@ class CampaignService {
   }
 
   /// Get campaign metadata (tramo_actual, dias, etc.)
+  /// Con timeout: sin esto un WebChannel colgado deja el panel en spinner eterno.
   Future<Map<String, dynamic>?> getCampaignData(String campaignId) async {
     try {
-      final doc = await _db.collection('campañas').doc(campaignId).get();
+      final doc = await _db
+          .collection('campañas')
+          .doc(campaignId)
+          .get()
+          .timeout(const Duration(seconds: 15));
       return doc.data();
     } catch (e) {
       debugPrint('Error getting campaign data: $e');
@@ -61,22 +68,51 @@ class CampaignService {
     }
   }
 
-  /// Discover all available sections (gestores sub-collections).
-  Future<List<String>> getAvailableSections(String campaignId) async {
-    if (_cachedSectionsCampaignId == campaignId && _cachedSections != null) {
+  /// Discover section keys under `campañas/{id}/gestores`.
+  ///
+  /// [onlyWithClients] skips empty leftover folders (there can be hundreds)
+  /// so web admin stats do not open 500+ Firestore streams at once.
+  Future<List<String>> getAvailableSections(
+    String campaignId, {
+    bool onlyWithClients = false,
+  }) async {
+    if (!onlyWithClients &&
+        _cachedSectionsCampaignId == campaignId &&
+        _cachedSections != null) {
       return List<String>.from(_cachedSections!);
     }
 
     try {
-      final snapshot = await _db
-          .collection('campañas')
-          .doc(campaignId)
+      final campaignRef = _db.collection('campañas').doc(campaignId);
+      final gestoresSnap = await campaignRef
           .collection('gestores')
           .get()
-          .timeout(const Duration(seconds: 15));
-      final ids = snapshot.docs.map((d) => d.id).toList()..sort();
-      _cachedSectionsCampaignId = campaignId;
-      _cachedSections = ids;
+          .timeout(const Duration(seconds: 20));
+      final hints = gestoresSnap.docs.map((d) {
+        final raw = d.data()['num_clientes'];
+        int? n;
+        if (raw is num) n = raw.toInt();
+        return GestorSectionHint(id: d.id, numClientes: n);
+      }).toList();
+
+      List<dynamic>? metaSecciones;
+      if (onlyWithClients) {
+        final campaignSnap =
+            await campaignRef.get().timeout(const Duration(seconds: 15));
+        metaSecciones = campaignSnap.data()?['secciones'] as List<dynamic>?;
+      }
+
+      final ids = onlyWithClients
+          ? resolveLoadableSectionIds(
+              campaignSecciones: metaSecciones,
+              hints: hints,
+            )
+          : (hints.map((h) => h.id).toList()..sort());
+
+      if (!onlyWithClients) {
+        _cachedSectionsCampaignId = campaignId;
+        _cachedSections = ids;
+      }
       return ids;
     } catch (e) {
       debugPrint('Error getting sections: $e');

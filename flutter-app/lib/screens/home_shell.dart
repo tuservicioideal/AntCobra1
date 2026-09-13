@@ -11,7 +11,10 @@ import '../services/location_service.dart';
 import '../services/tracking_service.dart';
 import 'admin_dashboard_screen.dart';
 import 'consulta_telegram_screen.dart';
+import 'casos_funnel_screen.dart';
+import 'casos_list_screen.dart';
 import 'dashboard_screen.dart';
+import 'gestor_activity_screen.dart';
 import 'stats_screen.dart';
 import 'client_map_screen.dart';
 import 'my_routes_screen.dart';
@@ -19,6 +22,8 @@ import 'profile_screen.dart';
 import 'more_screen.dart';
 import 'tracking_screen.dart';
 import '../widgets/map_visibility_scope.dart';
+import '../services/map_visit_candidates_notifier.dart';
+import '../services/shell_tab_intent_notifier.dart';
 
 /// Main app shell with bottom navigation.
 /// Shows Dashboard, Stats (if allowed), Admin (if allowed).
@@ -30,16 +35,42 @@ class HomeShell extends StatefulWidget {
 }
 
 class _HomeShellState extends State<HomeShell> {
+  static const int _gestorMapTabIndex = 1;
   static const int _gestorMyRoutesTabIndex = 2;
 
   int _currentIndex = 0;
   bool _gpsInitStarted = false;
   final GlobalKey<MyRoutesScreenState> _myRoutesKey = GlobalKey<MyRoutesScreenState>();
+  ShellTabIntentNotifier? _tabIntentNotifier;
 
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
     _startGpsIfNeeded();
+    final intent = context.read<ShellTabIntentNotifier>();
+    if (_tabIntentNotifier != intent) {
+      _tabIntentNotifier?.removeListener(_onTabIntent);
+      _tabIntentNotifier = intent;
+      _tabIntentNotifier!.addListener(_onTabIntent);
+    }
+  }
+
+  @override
+  void dispose() {
+    _tabIntentNotifier?.removeListener(_onTabIntent);
+    super.dispose();
+  }
+
+  void _onTabIntent() {
+    final pending = _tabIntentNotifier?.pending;
+    if (pending == null) return;
+    final profile = context.read<AuthService>().profile;
+    if (pending == HomeShellTab.map && profile?.isFieldGestor == true) {
+      _tabIntentNotifier?.consume();
+      _onTabSelected(_gestorMapTabIndex);
+      return;
+    }
+    _tabIntentNotifier?.consume();
   }
 
   void _startGpsIfNeeded() {
@@ -151,6 +182,7 @@ class _HomeShellState extends State<HomeShell> {
   Widget build(BuildContext context) {
     final auth = context.watch<AuthService>();
     final syncStatus = context.watch<SyncStatusService>();
+    final mapCandidates = context.watch<MapVisitCandidatesNotifier>();
     final profile = auth.profile;
 
     if (profile == null) {
@@ -166,11 +198,34 @@ class _HomeShellState extends State<HomeShell> {
 
     final isGestor = profile.isGestor;
     final isCallGestor = profile.isCallGestor;
+    final isResolutor = profile.isResolutor;
     final canManageUsers = profile.canManageUsers;
+    final canManageCasos = profile.canManageCasos;
     final canViewStats = profile.canViewStats;
 
     final List<_TabItem> tabs;
-    if (isCallGestor) {
+    if (isResolutor) {
+      tabs = <_TabItem>[
+        const _TabItem(
+          icon: Icons.view_kanban_outlined,
+          activeIcon: Icons.view_kanban,
+          label: 'Embudo',
+          screen: CasosFunnelScreen(),
+        ),
+        const _TabItem(
+          icon: Icons.folder_special_outlined,
+          activeIcon: Icons.folder_special,
+          label: 'Casos',
+          screen: CasosListScreen(),
+        ),
+        const _TabItem(
+          icon: Icons.person_outline,
+          activeIcon: Icons.person,
+          label: 'Perfil',
+          screen: ProfileScreen(),
+        ),
+      ];
+    } else if (isCallGestor) {
       tabs = <_TabItem>[
         const _TabItem(
           icon: Icons.headset_mic_outlined,
@@ -234,6 +289,13 @@ class _HomeShellState extends State<HomeShell> {
           label: 'Inicio',
           screen: AdminDashboardScreen(),
         ),
+        if (canManageCasos)
+          const _TabItem(
+            icon: Icons.view_kanban_outlined,
+            activeIcon: Icons.view_kanban,
+            label: 'Embudo',
+            screen: CasosFunnelScreen(),
+          ),
         if (canViewStats)
           const _TabItem(
             icon: Icons.bar_chart_outlined,
@@ -241,6 +303,12 @@ class _HomeShellState extends State<HomeShell> {
             label: 'Estadísticas',
             screen: StatsScreen(),
           ),
+        const _TabItem(
+          icon: Icons.timeline_outlined,
+          activeIcon: Icons.timeline,
+          label: 'Actividad',
+          screen: GestorActivityScreen(),
+        ),
         const _TabItem(
           icon: Icons.groups_outlined,
           activeIcon: Icons.groups,
@@ -291,13 +359,14 @@ class _HomeShellState extends State<HomeShell> {
       ];
     }
 
+    final mapBadge = isGestor && !isCallGestor ? mapCandidates.count : 0;
     _ensureValidTabIndex(tabs.length);
     final safeIndex = tabs.isEmpty
         ? 0
         : _currentIndex.clamp(0, tabs.length - 1);
 
     final useSideNav = context.isExpanded;
-    final showWebGpsHint = kIsWeb && isGestor;
+    final showWebGpsHint = kIsWeb && isGestor && !isCallGestor;
 
     final contentStack = IndexedStack(
       index: safeIndex,
@@ -396,21 +465,23 @@ class _HomeShellState extends State<HomeShell> {
       ],
     );
 
-    final shellBody = LayoutBuilder(
-      builder: (context, constraints) {
-        return Align(
-          alignment: Alignment.topCenter,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(
-              maxWidth: ResponsiveBreakpoints.contentMax,
-              minHeight: constraints.maxHeight,
-              maxHeight: constraints.maxHeight,
-            ),
-            child: mainColumn,
-          ),
-        );
-      },
-    );
+    final shellBody = useSideNav
+        ? mainColumn
+        : LayoutBuilder(
+            builder: (context, constraints) {
+              return Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(
+                    maxWidth: ResponsiveBreakpoints.contentMax,
+                    minHeight: constraints.maxHeight,
+                    maxHeight: constraints.maxHeight,
+                  ),
+                  child: mainColumn,
+                ),
+              );
+            },
+          );
 
     if (useSideNav) {
       return Scaffold(
@@ -423,8 +494,12 @@ class _HomeShellState extends State<HomeShell> {
               destinations: tabs
                   .map(
                     (t) => NavigationRailDestination(
-                      icon: Icon(t.icon),
-                      selectedIcon: Icon(t.activeIcon, color: AppTheme.primaryColor),
+                      icon: _tabNavIcon(t, selected: false, mapBadge: mapBadge),
+                      selectedIcon: _tabNavIcon(
+                        t,
+                        selected: true,
+                        mapBadge: mapBadge,
+                      ),
                       label: Text(t.label),
                     ),
                   )
@@ -456,14 +531,29 @@ class _HomeShellState extends State<HomeShell> {
           indicatorColor: AppTheme.primaryColor.withValues(alpha: 0.12),
           destinations: tabs
               .map((t) => NavigationDestination(
-                    icon: Icon(t.icon),
-                    selectedIcon:
-                        Icon(t.activeIcon, color: AppTheme.primaryColor),
+                    icon: _tabNavIcon(t, selected: false, mapBadge: mapBadge),
+                    selectedIcon: _tabNavIcon(
+                      t,
+                      selected: true,
+                      mapBadge: mapBadge,
+                    ),
                     label: t.label,
                   ))
               .toList(),
         ),
       ),
+    );
+  }
+
+  Widget _tabNavIcon(_TabItem tab, {required bool selected, required int mapBadge}) {
+    final icon = Icon(
+      selected ? tab.activeIcon : tab.icon,
+      color: selected ? AppTheme.primaryColor : null,
+    );
+    if (tab.label != 'Mapa' || mapBadge <= 0) return icon;
+    return Badge(
+      label: Text('$mapBadge'),
+      child: icon,
     );
   }
 }

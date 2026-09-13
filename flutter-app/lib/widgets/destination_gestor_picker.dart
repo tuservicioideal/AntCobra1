@@ -28,9 +28,6 @@ List<DestinationOption> buildDestinationOptions({
 
   for (final gestor in gestores) {
     final keys = resolveGestorSectionKeys(gestor);
-    if (gestor.isCallGestor && keys.isEmpty && gestor.uid.isNotEmpty) {
-      keys.add(callSectionKeyForUid(gestor.uid));
-    }
     for (final key in keys) {
       if (key.isEmpty || isReservedReassignmentSection(key)) continue;
       assignedSections.add(key);

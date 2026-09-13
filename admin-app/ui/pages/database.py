@@ -9,6 +9,13 @@ from tkinter import ttk, messagebox, filedialog
 from typing import TYPE_CHECKING, Any
 
 from services.campana_banco_utils import display_label_for_key
+from services.semaforo import (
+    IDS_ORDEN,
+    NIVELES,
+    filter_options as semaforo_filter_options,
+    label_for,
+    normalize_semaforo,
+)
 from ..theme import *
 from ..components import SectionHeader
 
@@ -67,6 +74,7 @@ _FICHA_SECTIONS: list[tuple[str, list[tuple[str, str]]]] = [
     ]),
     ("Gestión", [
         ("estado_gestion", "Estado gestión"),
+        ("semaforo", "Semáforo"),
         ("nota_gestor", "Nota gestor"),
         ("fecha_gestion", "Fecha gestión"),
         ("gps_latitud", "GPS lat"),
@@ -99,6 +107,7 @@ class DatabasePage:
         self._btn_next = None
         self._search_var = ctk.StringVar(value="")
         self._estado_var = ctk.StringVar(value="(Todos)")
+        self._semaforo_var = ctk.StringVar(value="(Todos)")
         self._region_var = ctk.StringVar(value="(Todas)")
         self._zona_var = ctk.StringVar(value="(Todas)")
         self._seccion_var = ctk.StringVar(value="(Todas)")
@@ -108,11 +117,13 @@ class DatabasePage:
         self._estado_pub_var = ctk.StringVar(value="(Todos)")
         self._gestor_pub_var = ctk.StringVar(value="(Todos)")
         self._estado_menu = None
+        self._semaforo_menu = None
         self._region_menu = None
         self._zona_menu = None
         self._seccion_menu = None
         self._campana_banco_menu = None
         self._campana_banco_label_to_key: dict[str, str] = {}
+        self._semaforo_label_to_key: dict[str, str] = {}
         self._carta_pub_menu = None
         self._formato_pub_menu = None
         self._estado_pub_menu = None
@@ -131,6 +142,7 @@ class DatabasePage:
         self._filters_btn = None
         self._contact_btn = None
         self._etiquetas_btn = None
+        self._semaforo_btn = None
         self._browse_campana_id: str | None = None
         self._campaign_var = ctk.StringVar(value="")
         self._campaign_menu = None
@@ -286,6 +298,7 @@ class DatabasePage:
         self._filters_btn.pack(side="left", padx=(0, 12))
 
         self._estado_menu = None
+        self._semaforo_menu = None
         self._region_menu = None
         self._zona_menu = None
         self._seccion_menu = None
@@ -302,7 +315,7 @@ class DatabasePage:
 
         cols = (
             "codigo", "nombre", "dni", "campana_banco", "telefono", "direccion",
-            "region", "zona", "seccion", "estado", "fecha_gestion", "origen",
+            "region", "zona", "seccion", "estado", "semaforo", "fecha_gestion", "origen",
         )
         hdrs = {
             "codigo": "Código",
@@ -315,6 +328,7 @@ class DatabasePage:
             "zona": "Zona",
             "seccion": "Sección",
             "estado": "Estado",
+            "semaforo": "Semáforo",
             "fecha_gestion": "Últ. gestión",
             "origen": "Origen",
         }
@@ -325,7 +339,7 @@ class DatabasePage:
             "codigo": 90, "nombre": 150, "dni": 85, "campana_banco": 90,
             "telefono": 95, "direccion": 120,
             "region": 70, "zona": 70, "seccion": 60, "estado": 90,
-            "fecha_gestion": 110, "origen": 70,
+            "semaforo": 90, "fecha_gestion": 110, "origen": 70,
         }
         for c in cols:
             self._tree.heading(c, text=hdrs[c])
@@ -373,6 +387,16 @@ class DatabasePage:
             command=self._open_etiquetas_dialog,
         )
         self._etiquetas_btn.pack(side="right")
+
+        self._semaforo_btn = ctk.CTkButton(
+            detail_actions,
+            text="Editar semáforo",
+            width=140,
+            height=32,
+            state="disabled",
+            command=self._open_semaforo_dialog,
+        )
+        self._semaforo_btn.pack(side="right", padx=(0, 8))
 
         self._detail_box = ctk.CTkTextbox(detail, height=240, wrap="word")
         self._detail_box.pack(fill="x", padx=12, pady=(0, 12))
@@ -737,6 +761,7 @@ class DatabasePage:
             formato_publicacion=self._formato_publicacion_value(),
             estado_publicacion=self._estado_publicacion_value(),
             gestor_publicacion=self._gestor_publicacion_value(),
+            semaforo=self._semaforo_value(),
         )
 
         self._page = payload["page"]
@@ -763,6 +788,7 @@ class DatabasePage:
                         c.get("zona", ""),
                         c.get("seccion", ""),
                         c.get("estado_gestion", "pendiente"),
+                        label_for(c.get("semaforo")),
                         fg,
                         c.get("origen_actualizacion", "") or "",
                     ),
@@ -804,6 +830,8 @@ class DatabasePage:
         count = 0
         if self._estado_var.get() not in ("", "(Todos)"):
             count += 1
+        if self._semaforo_var.get() not in ("", "(Todos)"):
+            count += 1
         if self._region_var.get() not in ("", "(Todas)"):
             count += 1
         if self._zona_var.get() not in ("", "(Todas)"):
@@ -840,9 +868,12 @@ class DatabasePage:
         self._contact_btn.configure(state=state)
         if self._etiquetas_btn and self._etiquetas_btn.winfo_exists():
             self._etiquetas_btn.configure(state=state)
+        if self._semaforo_btn and self._semaforo_btn.winfo_exists():
+            self._semaforo_btn.configure(state=state)
 
     def _clear_filters(self):
         self._estado_var.set("(Todos)")
+        self._semaforo_var.set("(Todos)")
         self._region_var.set("(Todas)")
         self._zona_var.set("(Todas)")
         self._seccion_var.set("(Todas)")
@@ -859,6 +890,7 @@ class DatabasePage:
             self._filters_popup.destroy()
         self._filters_popup = None
         self._estado_menu = None
+        self._semaforo_menu = None
         self._region_menu = None
         self._zona_menu = None
         self._seccion_menu = None
@@ -886,14 +918,15 @@ class DatabasePage:
 
         parent.grid_columnconfigure(1, weight=1)
         add_row(0, "Estado:", "_estado_menu", self._estado_var, 280)
-        add_row(1, "Región:", "_region_menu", self._region_var, 280, command=self._on_region_change)
-        add_row(2, "Zona:", "_zona_menu", self._zona_var, 280, command=self._on_zona_change)
-        add_row(3, "Sección:", "_seccion_menu", self._seccion_var, 280)
-        add_row(4, "Nº campaña:", "_campana_banco_menu", self._campana_banco_var, 280)
-        add_row(5, "Carta:", "_carta_pub_menu", self._carta_pub_var, 280)
-        add_row(6, "Formato:", "_formato_pub_menu", self._formato_pub_var, 280)
-        add_row(7, "Estado publicación:", "_estado_pub_menu", self._estado_pub_var, 280)
-        add_row(8, "Gestor destino:", "_gestor_pub_menu", self._gestor_pub_var, 280)
+        add_row(1, "Semáforo:", "_semaforo_menu", self._semaforo_var, 280)
+        add_row(2, "Región:", "_region_menu", self._region_var, 280, command=self._on_region_change)
+        add_row(3, "Zona:", "_zona_menu", self._zona_var, 280, command=self._on_zona_change)
+        add_row(4, "Sección:", "_seccion_menu", self._seccion_var, 280)
+        add_row(5, "Nº campaña:", "_campana_banco_menu", self._campana_banco_var, 280)
+        add_row(6, "Carta:", "_carta_pub_menu", self._carta_pub_var, 280)
+        add_row(7, "Formato:", "_formato_pub_menu", self._formato_pub_var, 280)
+        add_row(8, "Estado publicación:", "_estado_pub_menu", self._estado_pub_var, 280)
+        add_row(9, "Gestor destino:", "_gestor_pub_menu", self._gestor_pub_var, 280)
         self._load_filter_options(preserve_selection=True)
 
     def _open_filters_dialog(self):
@@ -905,8 +938,8 @@ class DatabasePage:
         win = ctk.CTkToplevel(root)
         self._filters_popup = win
         win.title("Filtros avanzados")
-        win.geometry("480x520")
-        win.minsize(420, 460)
+        win.geometry("480x560")
+        win.minsize(420, 500)
         win.configure(fg_color=BG)
         win.transient(root)
         win.grab_set()
@@ -1081,6 +1114,12 @@ class DatabasePage:
     def _estado_value(self) -> str:
         return "" if self._estado_var.get() in ("", "(Todos)") else self._estado_var.get()
 
+    def _semaforo_value(self) -> str:
+        label = self._semaforo_var.get()
+        if label in ("", "(Todos)"):
+            return ""
+        return self._semaforo_label_to_key.get(label, "")
+
     def _seccion_value(self) -> str:
         return "" if self._seccion_var.get() in ("", "(Todas)") else self._seccion_var.get()
 
@@ -1120,6 +1159,7 @@ class DatabasePage:
             return
 
         prev_estado = self._estado_var.get()
+        prev_semaforo = self._semaforo_var.get()
         prev_region = self._region_var.get()
         prev_zona = self._zona_var.get()
         prev_seccion = self._seccion_var.get()
@@ -1136,6 +1176,11 @@ class DatabasePage:
             seccion=self._seccion_value(),
         )
         estados = ["(Todos)"] + opts.get("estados", [])
+        semaforo_labels = ["(Todos)"]
+        self._semaforo_label_to_key = {}
+        for key, label in semaforo_filter_options():
+            semaforo_labels.append(label)
+            self._semaforo_label_to_key[label] = key
         regiones = ["(Todas)"] + opts.get("regiones", [])
         zonas = ["(Todas)"] + opts.get("zonas", [])
         secciones = ["(Todas)"] + opts.get("secciones", [])
@@ -1152,6 +1197,11 @@ class DatabasePage:
         gestores_pub = ["(Todos)"] + opts.get("gestores_publicacion", [])
 
         estado_sel = prev_estado if preserve_selection and prev_estado in estados else "(Todos)"
+        semaforo_sel = (
+            prev_semaforo
+            if preserve_selection and prev_semaforo in semaforo_labels
+            else "(Todos)"
+        )
         region_sel = prev_region if preserve_selection and prev_region in regiones else "(Todas)"
         zona_sel = prev_zona if preserve_selection and prev_zona in zonas else "(Todas)"
         seccion_sel = prev_seccion if preserve_selection and prev_seccion in secciones else "(Todas)"
@@ -1168,6 +1218,9 @@ class DatabasePage:
         if self._estado_menu and self._estado_menu.winfo_exists():
             self._estado_menu.configure(values=estados)
             self._estado_var.set(estado_sel)
+        if self._semaforo_menu and self._semaforo_menu.winfo_exists():
+            self._semaforo_menu.configure(values=semaforo_labels)
+            self._semaforo_var.set(semaforo_sel)
         if self._region_menu and self._region_menu.winfo_exists():
             self._region_menu.configure(values=regiones)
             self._region_var.set(region_sel)
@@ -1319,6 +1372,13 @@ class DatabasePage:
                 f"  {', '.join(tag_names) if tag_names else '—'}",
                 "",
             ])
+
+        lines.extend([
+            "═══ SEMÁFORO ═══",
+            "",
+            f"  {label_for(c.get('semaforo'))}",
+            "",
+        ])
 
         lines.extend(["═══ NOTAS DE CAMPO (gestor) ═══", ""])
         if not notas_campo:
@@ -1607,6 +1667,76 @@ class DatabasePage:
         ).pack(side="right")
         ctk.CTkButton(btn_row, text="Cancelar", width=100, command=win.destroy).pack(side="right", padx=8)
 
+    def _open_semaforo_dialog(self):
+        if not self._selected_code:
+            return
+        campana_id = self._get_browse_campana_id()
+        if not campana_id:
+            return
+        timeline = self.app.campaign_mgr.get_client_timeline(campana_id, self._selected_code)
+        if not timeline:
+            return
+        cliente = timeline["cliente"]
+        current = normalize_semaforo(cliente.get("semaforo"))
+
+        win = ctk.CTkToplevel(self._container)
+        win.title("Semáforo del cliente")
+        win.geometry("380x360")
+        win.transient(self._container.winfo_toplevel())
+        win.grab_set()
+
+        ctk.CTkLabel(
+            win, text=f"Cliente: {cliente.get('nombre_completo', '—')}",
+            font=font(12, "bold"),
+        ).pack(anchor="w", padx=16, pady=(12, 4))
+        ctk.CTkLabel(
+            win,
+            text="Rojo = renuente · Verde = cooperativo",
+            font=font(11),
+            text_color=TEXT_MUTED,
+        ).pack(anchor="w", padx=16, pady=(0, 8))
+
+        choice = ctk.StringVar(value=current)
+
+        options_frame = ctk.CTkFrame(win, fg_color="transparent")
+        options_frame.pack(fill="both", expand=True, padx=16, pady=8)
+
+        ctk.CTkRadioButton(
+            options_frame,
+            text="Sin clasificar",
+            variable=choice,
+            value="",
+        ).pack(anchor="w", pady=4)
+
+        for sid in IDS_ORDEN:
+            nombre, hex_color = NIVELES[sid]
+            ctk.CTkRadioButton(
+                options_frame,
+                text=f"{nombre} ({sid})",
+                variable=choice,
+                value=sid,
+                text_color=hex_color,
+            ).pack(anchor="w", pady=4)
+
+        def save():
+            self.app.campaign_mgr.set_client_semaforo(
+                campana_id,
+                self._selected_code,
+                choice.get(),
+                firebase_service=self.app.firebase if self.app.firebase_connected else None,
+            )
+            win.destroy()
+            self._refresh_detail(self._selected_code)
+            self._load_page(self._page)
+
+        btn_row = ctk.CTkFrame(win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=16, pady=12)
+        ctk.CTkButton(
+            btn_row, text="Guardar", width=100,
+            fg_color=ACCENT, hover_color=ACCENT_HOVER, command=save,
+        ).pack(side="right")
+        ctk.CTkButton(btn_row, text="Cancelar", width=100, command=win.destroy).pack(side="right", padx=8)
+
     def _on_row_select(self, _event=None):
         if not self._tree or not self._tree.winfo_exists():
             return
@@ -1626,7 +1756,9 @@ class DatabasePage:
             lines.append(f"── {title} ──")
             for key, label in fields:
                 val = c.get(key, "")
-                if isinstance(val, float) and key.startswith("importe"):
+                if key == "semaforo":
+                    val = label_for(val)
+                elif isinstance(val, float) and key.startswith("importe"):
                     val = f"S/ {val:,.2f}"
                 elif isinstance(val, float) and key.startswith("monto"):
                     val = f"S/ {val:,.2f}"

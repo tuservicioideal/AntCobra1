@@ -22,9 +22,13 @@ import '../utils/campana_banco_utils.dart';
 import '../utils/client_list_pagination.dart';
 import '../widgets/campana_banco_filter_bar.dart';
 import '../widgets/client_list_pagination_bar.dart';
+import '../widgets/tramo_filter_bar.dart';
 import '../services/location_service.dart';
+import '../services/map_visit_candidates_notifier.dart';
 import '../services/route_refresh_service.dart';
 import '../utils/map_error_logger.dart';
+import '../utils/map_client_filter.dart';
+import '../utils/tramo_filter.dart';
 import '../utils/responsive.dart';
 import '../utils/section_utils.dart';
 import '../widgets/adaptive_sheet.dart';
@@ -35,7 +39,8 @@ const _allMySectionsKey = '__all_my_sections__';
 const _sectionMetaTimeout = Duration(seconds: 8);
 const _mapTapHintPrefsKey = 'client_map_tap_hint_dismissed';
 const _overlapDistanceM = 25.0;
-const _listCardExtent = 196.0;
+const _listCardExtent = 216.0;
+const _bottomCardHeight = 156.0;
 const _clusterMinClients = 40;
 const _distance = Distance();
 
@@ -55,6 +60,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   final _mapController = MapController();
   final _listScrollController = ScrollController();
   final _searchController = TextEditingController();
+  final _searchFocus = FocusNode();
   final _dateFormat = DateFormat('yyyy-MM-dd');
 
   String? _campaignId;
@@ -83,6 +89,10 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   String? _lastToggledClientId;
   final _listPagination = ClientListPagination();
   CampanaBancoFilterNotifier? _campanaFilterNotifier;
+  MapVisitCandidatesNotifier? _candidatesNotifier;
+  bool _isFieldGestor = false;
+  bool _searchOpen = false;
+  Set<int> _tramoFilter = {};
 
   @override
   MapController get mapControllerForRefresh => _mapController;
@@ -94,6 +104,8 @@ class _ClientMapScreenState extends State<ClientMapScreen>
 
   @override
   void didChangeDependencies() {
+    _isFieldGestor =
+        context.read<AuthService>().profile?.isFieldGestor ?? false;
     super.didChangeDependencies();
     final notifier = context.read<CampanaBancoFilterNotifier>();
     if (_campanaFilterNotifier != notifier) {
@@ -101,6 +113,65 @@ class _ClientMapScreenState extends State<ClientMapScreen>
       _campanaFilterNotifier = notifier;
       _campanaFilterNotifier!.addListener(_onCampanaFilterChanged);
     }
+    final candidates = context.read<MapVisitCandidatesNotifier>();
+    if (_candidatesNotifier != candidates) {
+      _candidatesNotifier?.removeListener(_onCandidatesChanged);
+      _candidatesNotifier = candidates;
+      _candidatesNotifier!.addListener(_onCandidatesChanged);
+      if (candidates.hasFocus && _mapDataLoadStarted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _onCandidatesChanged();
+        });
+      }
+    }
+  }
+
+  /// El gestor de campo solo ve en Mapa lo que envió desde Perfil.
+  bool get _restrictToProfileCandidates => _isFieldGestor;
+
+  bool get _hasProfileCandidates =>
+      (_candidatesNotifier?.hasFocus ?? false);
+
+  List<ClientModel> get _markerClients =>
+      _filtered.where((c) => c.hasCoordinates).toList();
+
+  void _onCandidatesChanged() {
+    if (!mounted || !_mapDataLoadStarted) return;
+    if (_restrictToProfileCandidates) {
+      _bindClientsFromCandidates();
+      return;
+    }
+    setState(() => _mergeVisitCandidatesInto(_clients));
+    _applySearch(_query);
+    if (_hasProfileCandidates) _fitToMarkers();
+  }
+
+  void _mergeVisitCandidatesInto(List<ClientModel> clients) {
+    final notifier = _candidatesNotifier;
+    if (notifier == null || !notifier.hasFocus) return;
+    final existing = <String>{for (final c in clients) c.id};
+    for (final candidate in notifier.candidates) {
+      if (existing.add(candidate.id)) {
+        clients.add(candidate);
+      }
+    }
+  }
+
+  void _bindClientsFromCandidates() {
+    if (!mounted) return;
+    final candidates =
+        List<ClientModel>.from(_candidatesNotifier?.candidates ?? const []);
+    setState(() {
+      _clients = candidates;
+      _selectedIds.removeWhere((id) => !_clients.any((c) => c.id == id));
+    });
+    context.read<CampanaBancoFilterNotifier>().updateAvailable(candidates);
+    _applySearch(_query);
+    _fitToMarkers();
+  }
+
+  void _clearVisitCandidates() {
+    _candidatesNotifier?.clear();
   }
 
   void _onCampanaFilterChanged() {
@@ -243,9 +314,11 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   @override
   void dispose() {
     _campanaFilterNotifier?.removeListener(_onCampanaFilterChanged);
+    _candidatesNotifier?.removeListener(_onCandidatesChanged);
     MapTilesConfig.tileErrorCount.removeListener(_onTileErrorsChanged);
     _listScrollController.dispose();
     _searchController.dispose();
+    _searchFocus.dispose();
     super.dispose();
   }
 
@@ -310,7 +383,9 @@ class _ClientMapScreenState extends State<ClientMapScreen>
 
       await MapErrorLogger.clearLastError();
 
-      if (selected != null) {
+      if (_restrictToProfileCandidates) {
+        _bindClientsFromCandidates();
+      } else if (selected != null) {
         await _loadSectionClients(selected);
       }
     } catch (e, st) {
@@ -332,6 +407,16 @@ class _ClientMapScreenState extends State<ClientMapScreen>
 
   Future<void> _loadSectionClients(String sectionId) async {
     if (_campaignId == null) return;
+    if (_restrictToProfileCandidates) {
+      setState(() {
+        _selectedSection = sectionId;
+        _loadingClients = false;
+        _loadError = null;
+      });
+      _applySearch(_query);
+      _fitToMarkers();
+      return;
+    }
     setState(() {
       _loadingClients = true;
       _selectedClient = null;
@@ -354,6 +439,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
 
       if (!mounted) return;
       final active = clients.where((c) => c.isActiveForGestor).toList();
+      _mergeVisitCandidatesInto(active);
       context.read<CampanaBancoFilterNotifier>().updateAvailable(active);
       setState(() {
         _selectedSection = sectionId;
@@ -380,21 +466,35 @@ class _ClientMapScreenState extends State<ClientMapScreen>
 
   void _applySearch(String q) {
     if (!mounted) return;
-    final query = q.trim().toLowerCase();
     final campanaFilter =
         context.read<CampanaBancoFilterNotifier>().selected;
     _query = q;
-    var base = applyCampanaBancoFilter(_clients, campanaFilter);
+    final base = filterMapClientList(
+      clients: _clients,
+      campanaFilter: campanaFilter,
+      query: q,
+      restrictToProfileCandidates: _restrictToProfileCandidates,
+      selectedSection: _selectedSection,
+      allSectionsKey: _allMySectionsKey,
+      candidateIds: _hasProfileCandidates ? _candidatesNotifier?.ids : null,
+      tramoFilter: _tramoFilter,
+    );
     _listPagination.reset();
-    if (query.isEmpty) {
-      setState(() => _filtered = base);
-      return;
-    }
-    setState(() {
-      _filtered = base
-          .where((c) => matchesClientSearch(c, q))
-          .toList();
+    setState(() => _filtered = base);
+  }
+
+  void _openSearch() {
+    setState(() => _searchOpen = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _searchFocus.requestFocus();
     });
+  }
+
+  void _closeSearch() {
+    _searchController.clear();
+    _searchFocus.unfocus();
+    setState(() => _searchOpen = false);
+    _applySearch('');
   }
 
   ClientModel? _clientById(String? id) {
@@ -406,8 +506,10 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   }
 
   List<ClientModel> _clientsNear(ClientModel anchor) {
+    if (!anchor.hasCoordinates) return [anchor];
     final anchorPoint = LatLng(anchor.latitude, anchor.longitude);
     return _filtered.where((other) {
+      if (!other.hasCoordinates) return false;
       final otherPoint = LatLng(other.latitude, other.longitude);
       final meters = _distance.as(LengthUnit.Meter, anchorPoint, otherPoint);
       return meters <= _overlapDistanceM;
@@ -451,6 +553,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   }
 
   void _focusClientOnMap(ClientModel client) {
+    if (!client.hasCoordinates) return;
     final zoom = _mapController.camera.zoom;
     _mapController.move(
       LatLng(client.latitude, client.longitude),
@@ -626,6 +729,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   Marker _buildClientMarker(ClientModel c, {required bool useGesture}) {
     final onRoute = _selectedIds.contains(c.id);
     final focused = _selectedClient?.id == c.id;
+    final isCandidate = _candidatesNotifier?.contains(c.id) ?? false;
     return Marker(
       key: ValueKey<String>(c.id),
       point: LatLng(c.latitude, c.longitude),
@@ -635,19 +739,22 @@ class _ClientMapScreenState extends State<ClientMapScreen>
         client: c,
         onRoute: onRoute,
         focused: focused,
+        isCandidate: isCandidate && !onRoute,
         onTap: useGesture ? () => _onMarkerTap(c) : null,
       ),
     );
   }
 
   Widget _buildClientMarkersLayer() {
-    final markers = _filtered.map((c) => _buildClientMarker(c, useGesture: true)).toList();
-    if (_filtered.length >= _clusterMinClients) {
+    final markerClients = _markerClients;
+    final markers =
+        markerClients.map((c) => _buildClientMarker(c, useGesture: true)).toList();
+    if (markerClients.length >= _clusterMinClients) {
       return MarkerClusterLayerWidget(
         options: MarkerClusterLayerOptions(
           maxClusterRadius: 45,
           size: const Size(MapClientMarker.hitSize, MapClientMarker.hitSize),
-          markers: _filtered
+          markers: markerClients
               .map((c) => _buildClientMarker(c, useGesture: false))
               .toList(),
           onMarkerTap: _onClusterMarkerTap,
@@ -697,7 +804,9 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   void _selectClientsInVisibleArea() {
     final bounds = _mapController.camera.visibleBounds;
     final inArea = _filtered
-        .where((c) => bounds.contains(LatLng(c.latitude, c.longitude)))
+        .where((c) =>
+            c.hasCoordinates &&
+            bounds.contains(LatLng(c.latitude, c.longitude)))
         .map((c) => c.id);
     setState(() {
       _selectedIds.addAll(inArea);
@@ -727,7 +836,9 @@ class _ClientMapScreenState extends State<ClientMapScreen>
     if (_drawnZonePoints.length < 3) return;
     final polygon = List<LatLng>.from(_drawnZonePoints);
     final inPolygon = _filtered
-        .where((c) => _isInsidePolygon(LatLng(c.latitude, c.longitude), polygon))
+        .where((c) =>
+            c.hasCoordinates &&
+            _isInsidePolygon(LatLng(c.latitude, c.longitude), polygon))
         .map((c) => c.id);
     setState(() {
       _selectedIds.addAll(inPolygon);
@@ -771,7 +882,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
     final dateChanged = _routeDate.year != now.year ||
         _routeDate.month != now.month ||
         _routeDate.day != now.day;
-    return sectionChanged || dateChanged;
+    return sectionChanged || dateChanged || _tramoFilter.isNotEmpty;
   }
 
   Widget _buildSectionDropdown({ValueChanged<String?>? onChanged}) {
@@ -824,6 +935,23 @@ class _ClientMapScreenState extends State<ClientMapScreen>
                     if (v == null) return;
                     await _loadSectionClients(v);
                     if (ctx.mounted) setSheetState(() {});
+                  },
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'Etapa',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
+                ),
+                const SizedBox(height: 8),
+                TramoFilterBar(
+                  clients: _clients,
+                  selected: _tramoFilter,
+                  expandedCards: true,
+                  keyPrefix: 'tramo-map-sheet',
+                  onTap: (tramo) {
+                    _tramoFilter = toggleExclusiveTramo(_tramoFilter, tramo);
+                    _applySearch(_query);
+                    setSheetState(() {});
                   },
                 ),
                 const SizedBox(height: 16),
@@ -929,46 +1057,101 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   Widget _buildSearchAndToolbarRow({
     required int withCoords,
     required int total,
+    required CampanaBancoFilterNotifier campanaFilterNotifier,
   }) {
     final filterIcon = Icon(
       Icons.tune,
+      size: 22,
       color: _hasActiveMapFilters() ? AppTheme.primaryColor : null,
     );
+    final compactButtonStyle = IconButton.styleFrom(
+      visualDensity: VisualDensity.compact,
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+    );
 
-    return Row(
+    return Column(
       children: [
-        Expanded(
-          child: TextField(
-            controller: _searchController,
-            decoration: const InputDecoration(
-              hintText: 'Buscar cliente por nombre o código',
-              prefixIcon: Icon(Icons.search),
-              border: OutlineInputBorder(),
-              isDense: true,
+        Row(
+          children: [
+            if (_searchOpen)
+              Expanded(
+                child: TextField(
+                  controller: _searchController,
+                  focusNode: _searchFocus,
+                  decoration: InputDecoration(
+                    hintText: 'Buscar cliente…',
+                    prefixIcon: const Icon(Icons.search, size: 20),
+                    suffixIcon: IconButton(
+                      onPressed: _closeSearch,
+                      icon: const Icon(Icons.close, size: 18),
+                      tooltip: 'Cerrar búsqueda',
+                    ),
+                    border: const OutlineInputBorder(),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 8,
+                      vertical: 8,
+                    ),
+                  ),
+                  onChanged: _applySearch,
+                ),
+              )
+            else
+              IconButton(
+                onPressed: _openSearch,
+                style: compactButtonStyle,
+                icon: Badge(
+                  isLabelVisible: _query.trim().isNotEmpty,
+                  child: const Icon(Icons.search),
+                ),
+                tooltip: 'Buscar cliente',
+              ),
+            if (!_searchOpen) ...[
+              Expanded(
+                child: CampanaBancoFilterBar(
+                  available: campanaFilterNotifier.available,
+                  selected: campanaFilterNotifier.selected,
+                  onSelected: campanaFilterNotifier.select,
+                  dense: true,
+                ),
+              ),
+            ],
+            IconButton(
+              onPressed: _showMapFiltersSheet,
+              style: compactButtonStyle,
+              icon: _hasActiveMapFilters()
+                  ? Badge(child: filterIcon)
+                  : filterIcon,
+              tooltip: 'Filtros',
             ),
-            onChanged: _applySearch,
+            IconButton(
+              onPressed: _showMapActionsSheet,
+              style: compactButtonStyle,
+              icon: const Icon(Icons.more_vert),
+              tooltip: 'Acciones',
+            ),
+            Padding(
+              padding: const EdgeInsets.only(left: 2, right: 2),
+              child: Text(
+                '$withCoords/$total',
+                style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 11),
+              ),
+            ),
+          ],
+        ),
+        if (_searchOpen &&
+            campanaBancoFilterBarVisible(campanaFilterNotifier.available)) ...[
+          const SizedBox(height: 6),
+          SizedBox(
+            width: double.infinity,
+            child: CampanaBancoFilterBar(
+              available: campanaFilterNotifier.available,
+              selected: campanaFilterNotifier.selected,
+              onSelected: campanaFilterNotifier.select,
+              dense: true,
+            ),
           ),
-        ),
-        const SizedBox(width: 4),
-        IconButton(
-          onPressed: _showMapFiltersSheet,
-          icon: _hasActiveMapFilters()
-              ? Badge(child: filterIcon)
-              : filterIcon,
-          tooltip: 'Filtros',
-        ),
-        IconButton(
-          onPressed: _showMapActionsSheet,
-          icon: const Icon(Icons.more_vert),
-          tooltip: 'Acciones',
-        ),
-        Padding(
-          padding: const EdgeInsets.only(left: 4),
-          child: Text(
-            '$withCoords/$total',
-            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
-          ),
-        ),
+        ],
       ],
     );
   }
@@ -999,7 +1182,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
       ),
     );
 
-    if (result == true && mounted && _selectedSection != null) {
+    if (result == true && mounted && !_restrictToProfileCandidates && _selectedSection != null) {
       await _loadSectionClients(_selectedSection!);
     }
   }
@@ -1027,19 +1210,24 @@ class _ClientMapScreenState extends State<ClientMapScreen>
       clientes: selected,
     );
 
+    final withoutGps = selected.where((c) => !c.hasCoordinates).length;
+    final savedLabel = withoutGps > 0
+        ? 'Ruta guardada con ${selected.length} clientes ($withoutGps sin ubicación)'
+        : 'Ruta guardada con ${selected.length} clientes';
+
     if (!mounted) return;
     setState(() {
       _savingRoute = false;
       _saveMsg = docId == null
           ? 'No se pudo guardar la ruta. Intenta nuevamente.'
-          : 'Ruta guardada con ${selected.length} clientes';
+          : savedLabel;
     });
 
     if (docId != null) {
       context.read<RouteRefreshService>().notifyRoutesChanged();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('Ruta guardada (${selected.length} clientes). Revisa en Mis rutas.'),
+          content: Text('$savedLabel. Revisa en Mis rutas.'),
           duration: const Duration(seconds: 4),
         ),
       );
@@ -1047,10 +1235,11 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   }
 
   void _fitToMarkers() {
-    if (_filtered.isEmpty && _myPosition == null) return;
+    final markerClients = _markerClients;
+    if (markerClients.isEmpty && _myPosition == null) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final points = _filtered
+      final points = markerClients
           .map((c) => LatLng(c.latitude, c.longitude))
           .toList();
       if (_myPosition != null) points.add(_myPosition!);
@@ -1082,6 +1271,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   @override
   Widget build(BuildContext context) {
     final campanaFilterNotifier = context.watch<CampanaBancoFilterNotifier>();
+    context.watch<MapVisitCandidatesNotifier>();
     return Scaffold(
       appBar: AppBar(
         title: const Text('Mapa de Clientes'),
@@ -1107,7 +1297,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
               child: Padding(
                 padding: const EdgeInsets.all(24),
                 child: Text(
-                  'Abre la pestaña Mapa para cargar los clientes.',
+                  'Abre la pestaña Mapa para ver los clientes enviados desde Perfil.',
                   textAlign: TextAlign.center,
                   style: TextStyle(color: Colors.grey.shade700, fontSize: 14),
                 ),
@@ -1157,7 +1347,9 @@ class _ClientMapScreenState extends State<ClientMapScreen>
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 10, 12, 4),
             child: Text(
-              '${_filtered.length} clientes con coordenadas',
+              '${_filtered.length} clientes'
+              '${_restrictToProfileCandidates || _hasProfileCandidates ? ' enviados' : ''}'
+              '${_markerClients.length != _filtered.length ? ' · ${_markerClients.length} con GPS' : ''}',
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
@@ -1169,7 +1361,8 @@ class _ClientMapScreenState extends State<ClientMapScreen>
             child: _filtered.isEmpty
                 ? Center(
                     child: Text(
-                      'Sin clientes en esta sección',
+                      _emptyListMessage(),
+                      textAlign: TextAlign.center,
                       style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
                     ),
                   )
@@ -1179,91 +1372,23 @@ class _ClientMapScreenState extends State<ClientMapScreen>
                       final c = pageClients[i];
                       final selected = _selectedClient?.id == c.id;
                       final onRoute = _selectedIds.contains(c.id);
-                      return Card(
-                        margin: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          side: BorderSide(
-                            color: onRoute
-                                ? Colors.green.shade700
-                                : (selected
-                                    ? AppTheme.primaryColor
-                                    : Colors.grey.shade200),
-                            width: selected || onRoute ? 2 : 1,
-                          ),
-                        ),
-                        child: InkWell(
-                          onTap: () => _openClientDetail(c),
-                          onLongPress: () {
-                            setState(() => _selectedClient = c);
-                            _focusClientOnMap(c);
-                          },
-                          mouseCursor: SystemMouseCursors.click,
-                          child: Padding(
-                            padding: const EdgeInsets.all(10),
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(
-                                  c.displayName,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    fontWeight: FontWeight.w700,
-                                    fontSize: 13,
-                                  ),
-                                ),
-                                const SizedBox(height: 4),
-                                Text(
-                                  'Cod: ${c.codigoCliente}',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: Colors.grey.shade600,
-                                  ),
-                                ),
-                                if (c.direccion.isNotEmpty) ...[
-                                  const SizedBox(height: 4),
-                                  Text(
-                                    c.direccion,
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.grey.shade700,
-                                    ),
-                                  ),
-                                ],
-                                const SizedBox(height: 8),
-                                Row(
-                                  children: [
-                                    Text(
-                                      'S/ ${c.importeDeudaAsignada.toStringAsFixed(0)}',
-                                      style: const TextStyle(
-                                        fontWeight: FontWeight.w600,
-                                        fontSize: 12,
-                                      ),
-                                    ),
-                                    const Spacer(),
-                                    IconButton(
-                                      onPressed: () => _toggleClientWithFeedback(c),
-                                      icon: Icon(
-                                        onRoute
-                                            ? Icons.check_circle
-                                            : Icons.add_circle_outline,
-                                        color: onRoute
-                                            ? Colors.green.shade700
-                                            : Colors.grey.shade600,
-                                      ),
-                                      tooltip: onRoute
-                                          ? 'Quitar de ruta'
-                                          : 'Agregar a ruta',
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
+                      final isCandidate =
+                          _candidatesNotifier?.contains(c.id) ?? false;
+                      return _MapClientCard(
+                        client: c,
+                        selected: selected,
+                        onRoute: onRoute,
+                        isCandidate: isCandidate,
+                        horizontal: false,
+                        onOpenDetail: () => _openClientDetail(c),
+                        onFocus: () {
+                          setState(() => _selectedClient = c);
+                          _focusClientOnMap(c);
+                        },
+                        onToggleRoute: () => _toggleClientWithFeedback(c),
+                        onOpenMaps: c.hasCoordinates
+                            ? () => _openInGoogleMaps(c.latitude, c.longitude)
+                            : null,
                       );
                     },
                   ),
@@ -1283,38 +1408,67 @@ class _ClientMapScreenState extends State<ClientMapScreen>
       (s) => s['id'] == _selectedSection,
       orElse: () => const {'num_clientes': 0, 'clientes_con_coordenadas': 0},
     );
-    final total = (selectedMeta['num_clientes'] as num?)?.toInt() ?? 0;
-    final withCoords = (selectedMeta['clientes_con_coordenadas'] as num?)?.toInt() ?? 0;
+    final total = _restrictToProfileCandidates
+        ? _filtered.length
+        : ((selectedMeta['num_clientes'] as num?)?.toInt() ?? 0);
+    final withCoords = _restrictToProfileCandidates
+        ? _markerClients.length
+        : ((selectedMeta['clientes_con_coordenadas'] as num?)?.toInt() ?? 0);
+    final showTapHint = _showMapTapHint && _filtered.isNotEmpty;
 
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
       color: Colors.white,
       child: Column(
         children: [
-          _buildSearchAndToolbarRow(withCoords: withCoords, total: total),
-          CampanaBancoFilterBar(
-            available: campanaFilterNotifier.available,
-            selected: campanaFilterNotifier.selected,
-            onSelected: campanaFilterNotifier.select,
+          _buildSearchAndToolbarRow(
+            withCoords: withCoords,
+            total: total,
+            campanaFilterNotifier: campanaFilterNotifier,
           ),
-          if (_showMapTapHint) ...[
-            const SizedBox(height: 8),
+          if (_clients.isNotEmpty) ...[
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: TramoFilterBar(
+                  clients: _clients,
+                  selected: _tramoFilter,
+                  compact: true,
+                  keyPrefix: 'tramo-map',
+                  onTap: (tramo) {
+                    _tramoFilter = toggleExclusiveTramo(_tramoFilter, tramo);
+                    _applySearch(_query);
+                  },
+                ),
+              ),
+            ),
+          ],
+          if (_hasProfileCandidates) ...[
+            const SizedBox(height: 6),
+            _buildCandidatesBanner(),
+          ] else if (_restrictToProfileCandidates) ...[
+            const SizedBox(height: 6),
+            _buildSelectFromProfileHint(),
+          ],
+          if (showTapHint) ...[
+            const SizedBox(height: 6),
             Material(
               color: Colors.indigo.shade50,
               borderRadius: BorderRadius.circular(8),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                 child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Icon(Icons.touch_app_outlined,
-                        size: 18, color: Colors.indigo.shade800),
+                        size: 16, color: Colors.indigo.shade800),
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Toca un punto del mapa para agregarlo o quitarlo de tu ruta.',
+                        'Toca un punto para agregarlo o quitarlo de tu ruta.',
                         style: TextStyle(
-                          fontSize: 12,
+                          fontSize: 11,
                           fontWeight: FontWeight.w600,
                           color: Colors.indigo.shade900,
                         ),
@@ -1322,7 +1476,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
                     ),
                     IconButton(
                       onPressed: _dismissMapTapHint,
-                      icon: const Icon(Icons.close, size: 18),
+                      icon: const Icon(Icons.close, size: 16),
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(),
                       tooltip: 'Cerrar',
@@ -1398,9 +1552,15 @@ class _ClientMapScreenState extends State<ClientMapScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
+              if (_hasProfileCandidates || _restrictToProfileCandidates) ...[
+                _legendRow(Colors.orange.shade700, 'Enviado desde Perfil'),
+                const SizedBox(height: 4),
+              ],
               _legendRow(Colors.green.shade700, 'En mi ruta'),
-              const SizedBox(height: 4),
-              _legendRow(AppTheme.primaryColor, 'Disponible'),
+              if (!_restrictToProfileCandidates) ...[
+                const SizedBox(height: 4),
+                _legendRow(AppTheme.primaryColor, 'Disponible'),
+              ],
               const SizedBox(height: 4),
               _legendRow(Colors.amber.shade600, 'Último tocado', ring: true),
             ],
@@ -1471,6 +1631,76 @@ class _ClientMapScreenState extends State<ClientMapScreen>
     );
   }
 
+  Widget _buildSelectFromProfileHint() {
+    return Material(
+      color: Colors.indigo.shade50,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Icon(Icons.person_pin_circle_outlined,
+                size: 18, color: Colors.indigo.shade800),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Elige clientes en Perfil → Avance por sección y envíalos al mapa. '
+                'Aquí no se muestra la cartera completa.',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.indigo.shade900,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCandidatesBanner() {
+    final count = _candidatesNotifier?.count ?? 0;
+    final withoutGps =
+        _candidatesNotifier?.candidates.where((c) => !c.hasCoordinates).length ??
+            0;
+    return Material(
+      color: Colors.orange.shade50,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        child: Row(
+          children: [
+            Icon(Icons.person_pin_circle_outlined,
+                size: 18, color: Colors.orange.shade900),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                withoutGps > 0
+                    ? '$count enviados · $withoutGps sin GPS'
+                    : '$count enviados desde Perfil. Toca uno a uno para la ruta.',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  color: Colors.orange.shade900,
+                ),
+              ),
+            ),
+            TextButton(
+              onPressed: _clearVisitCandidates,
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+              ),
+              child: const Text('Limpiar'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildLoadErrorBanner() {
     return Padding(
       padding: const EdgeInsets.only(top: 6),
@@ -1515,8 +1745,9 @@ class _ClientMapScreenState extends State<ClientMapScreen>
 
   Widget _buildMap() {
     final defaultCenter = _myPosition ?? const LatLng(-12.0464, -77.0428);
-    final center = _filtered.isNotEmpty
-        ? LatLng(_filtered.first.latitude, _filtered.first.longitude)
+    final markerClients = _markerClients;
+    final center = markerClients.isNotEmpty
+        ? LatLng(markerClients.first.latitude, markerClients.first.longitude)
         : defaultCenter;
     final mapKey = ValueKey('client-map-$_tileSourceIndex');
 
@@ -1527,7 +1758,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
           mapController: _mapController,
           options: MapOptions(
             initialCenter: center,
-            initialZoom: _filtered.isEmpty ? 13 : 12,
+            initialZoom: markerClients.isEmpty ? 13 : 12,
             minZoom: 4,
             maxZoom: 19,
             interactionOptions: const InteractionOptions(
@@ -1535,7 +1766,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
             ),
             onTap: (_, point) => _addZonePoint(point),
             onMapReady: () {
-              if (_filtered.isNotEmpty) {
+              if (markerClients.isNotEmpty) {
                 _fitToMarkers();
               }
             },
@@ -1630,7 +1861,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
             ),
             ),
           ),
-        if (!_loadingClients && _filtered.isEmpty)
+        if (!_loadingClients && markerClients.isEmpty)
           Positioned(
             left: 12,
             right: 12,
@@ -1642,10 +1873,7 @@ class _ClientMapScreenState extends State<ClientMapScreen>
               child: Padding(
                 padding: const EdgeInsets.all(12),
                 child: Text(
-                  _sections.isEmpty
-                      ? 'No tienes secciones asignadas. Contacta al administrador.'
-                      : 'Sin clientes con coordenadas en esta sección. '
-                          'Las visitas con GPS también aparecen aquí.',
+                  _emptyMapMessage(),
                   style: TextStyle(fontSize: 12, color: Colors.grey.shade800),
                   textAlign: TextAlign.center,
                 ),
@@ -1656,7 +1884,56 @@ class _ClientMapScreenState extends State<ClientMapScreen>
     );
   }
 
+  String _emptyListMessage() {
+    if (_sections.isEmpty) return 'Sin secciones asignadas';
+    if (_restrictToProfileCandidates) {
+      return _hasProfileCandidates
+          ? 'Sin clientes en esta vista. Prueba otro filtro o limpia la búsqueda.'
+          : 'Sin clientes enviados desde Perfil';
+    }
+    return 'Sin clientes con coordenadas en esta sección';
+  }
+
+  String _emptyMapMessage() {
+    if (_sections.isEmpty) {
+      return 'No tienes secciones asignadas. Contacta al administrador.';
+    }
+    if (_restrictToProfileCandidates) {
+      if (!_hasProfileCandidates) {
+        return 'Aún no hay clientes en el mapa. En Perfil, toca una zona en '
+            'Avance por sección, elige los clientes y envíalos aquí.';
+      }
+      if (_filtered.isEmpty) {
+        return 'Sin clientes enviados desde Perfil en esta vista.';
+      }
+      return 'Los clientes enviados no tienen ubicación. '
+          'Aparecen en la lista para agregarlos a la ruta.';
+    }
+    if (_hasProfileCandidates && _filtered.isEmpty) {
+      return 'Sin clientes enviados desde Perfil en esta vista.';
+    }
+    return 'Sin clientes con coordenadas en esta sección. '
+        'Las visitas con GPS también aparecen aquí.';
+  }
+
   Widget _buildBottomList() {
+    if (_filtered.isEmpty) {
+      if (_restrictToProfileCandidates && !_hasProfileCandidates) {
+        return const SizedBox.shrink();
+      }
+      return ColoredBox(
+        color: Colors.white,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 14),
+          child: Text(
+            _emptyListMessage(),
+            textAlign: TextAlign.center,
+            style: TextStyle(color: Colors.grey.shade600, fontSize: 13),
+          ),
+        ),
+      );
+    }
+
     final pageClients = _listPagination.slice(_filtered);
     return ColoredBox(
       color: Colors.white,
@@ -1664,101 +1941,33 @@ class _ClientMapScreenState extends State<ClientMapScreen>
         mainAxisSize: MainAxisSize.min,
         children: [
           SizedBox(
-            height: 120,
-            child: _filtered.isEmpty
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: Text(
-                        _sections.isEmpty
-                            ? 'Sin secciones asignadas'
-                            : 'Sin clientes con coordenadas en esta sección',
-                        textAlign: TextAlign.center,
-                        style: TextStyle(
-                            color: Colors.grey.shade600, fontSize: 13),
-                      ),
-                    ),
-                  )
-                : ListView.builder(
-                    controller: _listScrollController,
-                    itemCount: pageClients.length,
-                    scrollDirection: Axis.horizontal,
-                    itemBuilder: (context, i) {
-                      final c = pageClients[i];
+            height: _bottomCardHeight,
+            child: ListView.builder(
+              controller: _listScrollController,
+              itemCount: pageClients.length,
+              scrollDirection: Axis.horizontal,
+              itemBuilder: (context, i) {
+                final c = pageClients[i];
                 final selected = _selectedClient?.id == c.id;
                 final onRoute = _selectedIds.contains(c.id);
-                return GestureDetector(
-                  onTap: () => _openClientDetail(c),
-                  onLongPress: () {
+                final isCandidate =
+                    _candidatesNotifier?.contains(c.id) ?? false;
+                return _MapClientCard(
+                  client: c,
+                  selected: selected,
+                  onRoute: onRoute,
+                  isCandidate: isCandidate,
+                  horizontal: true,
+                  onOpenDetail: () => _openClientDetail(c),
+                  onFocus: () {
                     setState(() => _selectedClient = c);
                     _focusClientOnMap(c);
                     _scrollListToClient(c.id);
                   },
-                  child: Container(
-                    width: 180,
-                    margin: const EdgeInsets.all(8),
-                    padding: const EdgeInsets.all(10),
-                    decoration: BoxDecoration(
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: onRoute
-                            ? Colors.green.shade700
-                            : (selected ? AppTheme.primaryColor : Colors.grey.shade300),
-                        width: selected ? 2 : 1,
-                      ),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(c.displayName,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12)),
-                        const SizedBox(height: 6),
-                        Text('Cod: ${c.codigoCliente}',
-                            style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
-                        const Spacer(),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: TextButton.icon(
-                                onPressed: () => _openInGoogleMaps(c.latitude, c.longitude),
-                                style: TextButton.styleFrom(
-                                  padding: EdgeInsets.zero,
-                                  minimumSize: const Size(0, 0),
-                                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                ),
-                                icon: const Icon(Icons.map, size: 14),
-                                label: const Text('Maps', style: TextStyle(fontSize: 11)),
-                              ),
-                            ),
-                            TextButton.icon(
-                              onPressed: () => _openClientDetail(c),
-                              style: TextButton.styleFrom(
-                                padding: EdgeInsets.zero,
-                                minimumSize: const Size(0, 0),
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              ),
-                              icon: const Icon(Icons.person_outline, size: 14),
-                              label: const Text('Ficha', style: TextStyle(fontSize: 11)),
-                            ),
-                            IconButton(
-                              onPressed: () => _toggleClientWithFeedback(c),
-                              iconSize: 18,
-                              visualDensity: VisualDensity.compact,
-                              icon: Icon(
-                                onRoute
-                                    ? Icons.check_circle
-                                    : Icons.add_circle_outline,
-                                color: onRoute ? Colors.green.shade700 : Colors.grey.shade600,
-                              ),
-                              tooltip: onRoute ? 'Quitar de ruta' : 'Agregar a ruta',
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  ),
+                  onToggleRoute: () => _toggleClientWithFeedback(c),
+                  onOpenMaps: c.hasCoordinates
+                      ? () => _openInGoogleMaps(c.latitude, c.longitude)
+                      : null,
                 );
               },
             ),
@@ -1781,5 +1990,181 @@ class _ClientMapScreenState extends State<ClientMapScreen>
   Future<void> _openInGoogleMaps(double lat, double lng) async {
     final uri = Uri.parse('https://www.google.com/maps?q=$lat,$lng');
     await launchUrl(uri, mode: LaunchMode.externalApplication);
+  }
+}
+
+class _MapClientCard extends StatelessWidget {
+  const _MapClientCard({
+    required this.client,
+    required this.selected,
+    required this.onRoute,
+    required this.isCandidate,
+    required this.horizontal,
+    required this.onOpenDetail,
+    required this.onFocus,
+    required this.onToggleRoute,
+    this.onOpenMaps,
+  });
+
+  final ClientModel client;
+  final bool selected;
+  final bool onRoute;
+  final bool isCandidate;
+  final bool horizontal;
+  final VoidCallback onOpenDetail;
+  final VoidCallback onFocus;
+  final VoidCallback onToggleRoute;
+  final VoidCallback? onOpenMaps;
+
+  Color get _borderColor {
+    if (onRoute) return Colors.green.shade700;
+    if (isCandidate) return Colors.orange.shade700;
+    if (selected) return AppTheme.primaryColor;
+    return Colors.grey.shade300;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final card = Material(
+      color: Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      child: InkWell(
+        onTap: onOpenDetail,
+        onLongPress: onFocus,
+        borderRadius: BorderRadius.circular(12),
+        child: Ink(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: _borderColor,
+              width: selected || onRoute || isCandidate ? 2 : 1,
+            ),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  client.displayName,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: horizontal ? 12 : 13,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  client.hasCoordinates
+                      ? 'Cod: ${client.codigoCliente}'
+                      : 'Cod: ${client.codigoCliente} · Sin ubicación',
+                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                ),
+                if (!horizontal && client.direccion.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    client.direccion,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: Colors.grey.shade700),
+                  ),
+                ],
+                if (!horizontal) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'S/ ${client.importeDeudaAsignada.toStringAsFixed(0)}',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 12,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ] else
+                  const Spacer(),
+                Row(
+                  children: [
+                    _smallAction(
+                      icon: Icons.map_outlined,
+                      label: 'Maps',
+                      onPressed: onOpenMaps,
+                    ),
+                    const SizedBox(width: 4),
+                    _smallAction(
+                      icon: Icons.person_outline,
+                      label: 'Ficha',
+                      onPressed: onOpenDetail,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                SizedBox(
+                  width: double.infinity,
+                  height: 36,
+                  child: FilledButton.icon(
+                    onPressed: onToggleRoute,
+                    icon: Icon(
+                      onRoute ? Icons.check_circle : Icons.add_circle,
+                      size: 18,
+                    ),
+                    label: Text(
+                      onRoute ? 'En ruta' : 'Agregar a ruta',
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: onRoute
+                          ? Colors.green.shade700
+                          : AppTheme.primaryColor,
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (!horizontal) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: card,
+      );
+    }
+
+    return SizedBox(
+      width: 200,
+      height: _bottomCardHeight,
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(8, 8, 0, 8),
+        child: card,
+      ),
+    );
+  }
+
+  Widget _smallAction({
+    required IconData icon,
+    required String label,
+    required VoidCallback? onPressed,
+  }) {
+    return Expanded(
+      child: TextButton.icon(
+        onPressed: onPressed,
+        style: TextButton.styleFrom(
+          padding: EdgeInsets.zero,
+          minimumSize: const Size(0, 28),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          visualDensity: VisualDensity.compact,
+        ),
+        icon: Icon(icon, size: 14),
+        label: Text(label, style: const TextStyle(fontSize: 11)),
+      ),
+    );
   }
 }

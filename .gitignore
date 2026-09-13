@@ -11,9 +11,12 @@
 # Admin SDK JSON is excluded via *firebase-adminsdk*.json above.
 **/credentials.json
 **/secrets/
+**/e2e_credentials.local.json
+**/.env.e2e.local
 
 # Python
 .venv/
+venv/
 **/__pycache__/
 *.py[cod]
 *.egg-info/
@@ -27,6 +30,9 @@ node_modules/
 **/node_modules/
 dist/
 **/dist/
+test-results/
+playwright-report/
+blob-report/
 .vite/
 **/.vite/
 gestor-app/dist/

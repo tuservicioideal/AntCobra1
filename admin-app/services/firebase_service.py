@@ -14,7 +14,7 @@ import os
 import sys
 import json
 import mimetypes
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -194,7 +194,11 @@ class FirebaseService:
         "actualizado_por_uid", "actualizado_por_nombre", "actualizado_por_email",
         "origen_actualizacion",
         "etiquetas",
+        "semaforo",
     )
+
+    # Clasificación de campo: preservar aunque el cliente siga pendiente.
+    _ALWAYS_PRESERVE_FIELDS = ("etiquetas", "semaforo")
 
     def _read_existing_visit_data(self, campaign_ref, seccion: str) -> dict:
         """
@@ -217,9 +221,122 @@ class FirebaseService:
                 has_contact_update = bool(d.get("fecha_actualizacion_contacto_iso"))
                 if has_visit or has_contact_update:
                     result[doc.id] = {k: d.get(k) for k in self._VISIT_FIELDS}
+                else:
+                    preserved = {
+                        k: d.get(k)
+                        for k in self._ALWAYS_PRESERVE_FIELDS
+                        if k in d and d.get(k) not in (None, "", [])
+                    }
+                    if preserved:
+                        result[doc.id] = preserved
         except Exception:
             pass  # first upload — nothing to preserve
         return result
+
+    def _clear_visit_section_cache(self) -> None:
+        self._visit_section_cache = {}
+
+    def _visits_for_section(self, campaign_ref, seccion: str) -> dict:
+        """Una lectura de la sección por publicación; no re-streamear por cliente."""
+        cache = getattr(self, "_visit_section_cache", None)
+        if cache is None:
+            cache = {}
+            self._visit_section_cache = cache
+        if seccion not in cache:
+            cache[seccion] = self._read_existing_visit_data(campaign_ref, seccion)
+        return cache[seccion]
+
+    def get_cartera_publisher_state(self) -> dict:
+        if not self._initialized:
+            return {}
+        try:
+            snap = (
+                self.db.collection("configuracion")
+                .document("cartera_publisher")
+                .get()
+            )
+            return snap.to_dict() or {}
+        except Exception:
+            return {}
+
+    def desktop_publish_block_reason(self) -> str | None:
+        lock = self.get_cartera_publisher_state()
+        if self._publisher_lock_is_busy(lock):
+            return (
+                "Hay una publicación de cartera en curso "
+                f"({lock.get('activo') or 'otro proceso'}). Espera a que termine."
+            )
+        return None
+
+    def desktop_publish_web_warning(self) -> str | None:
+        lock = self.get_cartera_publisher_state()
+        if lock.get("activo") == "web" and lock.get("estado") != "publicando":
+            return (
+                "La última carga de cartera fue desde la web. "
+                "Publicar desde el escritorio puede pisar esa versión."
+            )
+        return None
+
+    @staticmethod
+    def _publisher_lock_is_busy(lock: dict | None, now: datetime | None = None) -> bool:
+        data = lock or {}
+        if data.get("estado") != "publicando":
+            return False
+        since = data.get("since")
+        if since is None:
+            return True
+        if not isinstance(since, datetime):
+            return True
+        ts = since if since.tzinfo else since.replace(tzinfo=timezone.utc)
+        current = now or datetime.now(timezone.utc)
+        return (current - ts) < timedelta(minutes=45)
+
+    def _claim_publisher_lock(self, source: str = "desktop") -> None:
+        if not self._initialized:
+            raise RuntimeError("Firebase no está inicializado.")
+        lock_ref = self.db.collection("configuracion").document("cartera_publisher")
+        transaction = self.db.transaction()
+
+        class _Busy(Exception):
+            pass
+
+        @firestore.transactional
+        def _claim(transaction):
+            snap = lock_ref.get(transaction=transaction)
+            lock = snap.to_dict() if snap.exists else {}
+            if FirebaseService._publisher_lock_is_busy(lock):
+                raise _Busy()
+            transaction.set(
+                lock_ref,
+                {
+                    "activo": source,
+                    "job_id": source,
+                    "estado": "publicando",
+                    "since": _SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+
+        try:
+            _claim(transaction)
+        except _Busy as exc:
+            raise RuntimeError(
+                "Hay otra publicación de cartera en curso. Espera a que termine."
+            ) from exc
+
+    def _release_publisher_lock(self, source: str, estado: str) -> None:
+        try:
+            self.db.collection("configuracion").document("cartera_publisher").set(
+                {
+                    "activo": source,
+                    "job_id": source,
+                    "estado": estado,
+                    "since": _SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+        except Exception:
+            pass
 
     def _sections_for_visit_lookup(
         self,
@@ -256,7 +373,7 @@ class FirebaseService:
         best: dict = {}
         best_ts = ""
         for sk in seccion_keys:
-            visits = self._read_existing_visit_data(campaign_ref, sk)
+            visits = self._visits_for_section(campaign_ref, sk)
             prev = visits.get(str(client_id), {})
             if not prev:
                 continue
@@ -289,8 +406,14 @@ class FirebaseService:
             count += 1
         return count
 
-    def upload_cartera(self, by_seccion: dict, campaign_id: str | None = None, 
-                       progress_callback=None) -> dict:
+    def upload_cartera(
+        self,
+        by_seccion: dict,
+        campaign_id: str | None = None,
+        progress_callback=None,
+        *,
+        replace_campaign_metadata: bool = True,
+    ) -> dict:
         """
         Upload client data to Firestore, organized by composite section key.
         
@@ -331,17 +454,19 @@ class FirebaseService:
         uploaded = 0
         preserved = 0
         errors = []
-        
+        claimed = False
         try:
-            # Create / overwrite campaign metadata
+            self._claim_publisher_lock("desktop")
+            claimed = True
             campaign_ref = self.db.collection("campañas").document(campaign_id)
-            campaign_ref.set({
-                "fecha_creacion": _SERVER_TIMESTAMP,
-                "total_clientes": total_clients,
-                "total_secciones": len(by_seccion),
-                "secciones": list(by_seccion.keys()),
-                "estado": "activa"
-            })
+            if replace_campaign_metadata:
+                campaign_ref.set({
+                    "fecha_creacion": _SERVER_TIMESTAMP,
+                    "total_clientes": total_clients,
+                    "total_secciones": len(by_seccion),
+                    "secciones": list(by_seccion.keys()),
+                    "estado": "activa"
+                })
             
             if progress_callback:
                 progress_callback(0, total_clients, "Campaña creada, subiendo clientes...")
@@ -449,15 +574,27 @@ class FirebaseService:
                 )
                 for clients in by_seccion.values()
             )
-            campaign_ref.update({
-                "estado": "distribuida",
-                "clientes_subidos": uploaded,
-                "total_clientes_con_coordenadas": total_clientes_con_coordenadas,
-                "fecha_distribucion": _SERVER_TIMESTAMP
-            })
+            if replace_campaign_metadata:
+                campaign_ref.update({
+                    "estado": "distribuida",
+                    "clientes_subidos": uploaded,
+                    "total_clientes_con_coordenadas": total_clientes_con_coordenadas,
+                    "fecha_distribucion": _SERVER_TIMESTAMP
+                })
+            else:
+                self.refresh_campaign_section_index(campaign_id)
+                campaign_ref.set({
+                    "estado": "distribuida",
+                    "fecha_distribucion": _SERVER_TIMESTAMP,
+                }, merge=True)
             
         except Exception as e:
             errors.append(str(e))
+        finally:
+            if claimed:
+                self._release_publisher_lock(
+                    "desktop", "listo" if not errors else "error"
+                )
         
         return {
             "campaign_id": campaign_id,
@@ -541,6 +678,8 @@ class FirebaseService:
         fallecido_inubicable = 0
         suplantacion = 0
         pago_no_registrado = 0
+        no_hizo_pedido = 0
+        completo_pedido_socia = 0
         deuda_total = 0.0
         deuda_visitada = 0.0
 
@@ -572,6 +711,12 @@ class FirebaseService:
                     elif estado == "pago_no_registrado":
                         pago_no_registrado += 1
                         deuda_visitada += deuda
+                    elif estado == "no_hizo_pedido":
+                        no_hizo_pedido += 1
+                        deuda_visitada += deuda
+                    elif estado == "completo_pedido_socia":
+                        completo_pedido_socia += 1
+                        deuda_visitada += deuda
 
                 secciones[sec_id] = {"info": sec_info, "clientes": clients}
 
@@ -586,6 +731,8 @@ class FirebaseService:
                 "fallecido_inubicable": fallecido_inubicable,
                 "suplantacion": suplantacion,
                 "pago_no_registrado": pago_no_registrado,
+                "no_hizo_pedido": no_hizo_pedido,
+                "completo_pedido_socia": completo_pedido_socia,
                 "deuda_total": round(deuda_total, 2),
                 "deuda_visitada": round(deuda_visitada, 2),
             }
@@ -731,7 +878,8 @@ class FirebaseService:
                            seccion: str = "", telefono: str = "", zona: str = "",
                            region: str = "", rol: str = "gestor",
                            secciones: list[str] | None = None,
-                           canal: str = "campo") -> dict:
+                           canal: str = "campo",
+                           call_codigo: str = "") -> dict:
         """
         Create a Firebase Auth user + Firestore profile for a user.
         
@@ -743,10 +891,11 @@ class FirebaseService:
             telefono: Phone number
             zona: Coverage zone
             region: Region code (e.g., '01', '02')
-            rol: User role ('gestor', 'asistente', 'supervisor', 'admin')
+            rol: User role ('gestor', 'asistente', 'resolutor', 'supervisor', 'admin')
             secciones: List of composite keys (e.g., ['01_1211_H', '01_1211_C']).
                        If provided, overrides seccion/region/zona logic.
-            canal: 'campo' (gestor territorial) o 'call' (call center tramo 1).
+            canal: 'campo' (gestor territorial) o 'call' (call center).
+            call_codigo: Código estático de operador call (E1-1 … E3-1).
         
         Returns:
             dict with uid and success status
@@ -755,7 +904,7 @@ class FirebaseService:
             raise RuntimeError("Firebase no está inicializado.")
         
         # Validate role
-        valid_roles = ('gestor', 'asistente', 'supervisor', 'admin')
+        valid_roles = ('gestor', 'asistente', 'resolutor', 'supervisor', 'admin')
         if rol not in valid_roles:
             rol = 'gestor'
 
@@ -767,9 +916,58 @@ class FirebaseService:
         normalized_email = email.strip().lower()
         normalized_seccion = seccion.strip().upper()
 
+        if rol != "gestor":
+            canal = "campo"
+
+        from .fase_reparto import (
+            normalize_call_codigo,
+            CALL_CODIGOS_TODOS,
+            CALL_SLOTS_MAX,
+            validate_call_slots,
+        )
+        call_code = normalize_call_codigo(call_codigo) if canal == "call" else ""
+
         # Build secciones list
-        if canal == "call" and rol == "gestor":
+        if rol in ("admin", "supervisor", "resolutor"):
+            final_secciones = []
+            region = ""
+            zona = ""
+            normalized_seccion = ""
+        elif canal == "call" and rol == "gestor":
             final_secciones = []  # se completa tras obtener UID
+            if not call_code:
+                return {
+                    "uid": None,
+                    "success": False,
+                    "error": (
+                        "Debe asignar un código de operador call "
+                        f"({', '.join(CALL_CODIGOS_TODOS)})."
+                    ),
+                }
+            # Validar tope 6 y código libre
+            existing = [
+                u for u in self.list_gestor_users()
+                if u.get("rol") == "gestor"
+                and u.get("canal") == "call"
+                and u.get("activo", True)
+            ]
+            if len(existing) >= CALL_SLOTS_MAX:
+                return {
+                    "uid": None,
+                    "success": False,
+                    "error": f"Ya hay {CALL_SLOTS_MAX} operadores call activos.",
+                }
+            taken = {
+                normalize_call_codigo(u.get("call_codigo"))
+                for u in existing
+                if normalize_call_codigo(u.get("call_codigo"))
+            }
+            if call_code in taken:
+                return {
+                    "uid": None,
+                    "success": False,
+                    "error": f"El código {call_code} ya está asignado a otro operador.",
+                }
         elif secciones:
             final_secciones = sorted(set(secciones))
             # Derive region/zona/seccion from first key for backward compat
@@ -813,6 +1011,8 @@ class FirebaseService:
                 "uid": user_record.uid,
                 "fecha_creacion": _SERVER_TIMESTAMP,
             }
+            if call_code:
+                profile_data["call_codigo"] = call_code
             
             # Create Firestore profile keyed by UID (canonical document)
             self.db.collection("usuarios").document(user_record.uid).set(profile_data)
@@ -1066,6 +1266,63 @@ class FirebaseService:
             if auth_updates:
                 auth.update_user(uid, **auth_updates)
 
+            # Validar call_codigo si el perfil resultante es call center:
+            # código válido + no duplicado entre operadores activos (excluyendo self).
+            try:
+                from .fase_reparto import (
+                    CALL_CODIGOS_TODOS,
+                    normalize_call_codigo,
+                )
+                _snap = self.db.collection("usuarios").document(uid).get()
+                _current = _snap.to_dict() if _snap.exists else {}
+                _rol = str(updates.get("rol", _current.get("rol", "gestor")))
+                _canal = str(updates.get("canal", _current.get("canal", "campo"))).strip().lower()
+                if _rol == "gestor" and _canal == "call":
+                    _code_changing = (
+                        "call_codigo" in updates
+                        or str(updates.get("canal", "")) == "call"
+                        or str(updates.get("rol", "")) == "gestor"
+                    )
+                    _raw_code = updates.get("call_codigo", _current.get("call_codigo", ""))
+                    _code = normalize_call_codigo(_raw_code)
+                    if not _code:
+                        return {
+                            "success": False,
+                            "error": (
+                                "Debe asignar etapa (1, 2 o 3) y código call válido "
+                                f"({', '.join(CALL_CODIGOS_TODOS)})."
+                            ),
+                        }
+                    updates["call_codigo"] = _code
+                    if _code_changing or _code != normalize_call_codigo(
+                        _current.get("call_codigo", "")
+                    ):
+                        _taken = set()
+                        for _d in self.db.collection("usuarios").stream():
+                            _u = _d.to_dict() or {}
+                            if _d.id == uid or (_u.get("uid") or "") == uid:
+                                continue
+                            if _u.get("rol") != "gestor" or _u.get("canal") != "call":
+                                continue
+                            if _u.get("activo", True) is False:
+                                continue
+                            _c = normalize_call_codigo(_u.get("call_codigo"))
+                            if _c:
+                                _taken.add(_c)
+                        if _code in _taken:
+                            return {
+                                "success": False,
+                                "error": f"El código {_code} ya está asignado a otra operadora.",
+                            }
+                elif "call_codigo" in updates:
+                    # Al salir de call se limpia el código
+                    updates["call_codigo"] = ""
+            except Exception:
+                # Si la validación no puede leerse (sin conexión), seguir con el guard
+                pass
+
+            updates = self._apply_call_seccion_guard(uid, updates)
+
             # Update Firestore profile (UID-keyed doc)
             if updates:
                 self.db.collection("usuarios").document(uid).update(updates)
@@ -1087,6 +1344,21 @@ class FirebaseService:
             return {"success": True, "error": None}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def _apply_call_seccion_guard(self, uid: str, updates: dict) -> dict:
+        """Call-center users always own `_CALL_{uid}`; drop territorial leftovers."""
+        current: dict = {}
+        if self._initialized:
+            snap = self.db.collection("usuarios").document(uid).get()
+            current = snap.to_dict() if snap.exists else {}
+        rol = updates.get("rol", current.get("rol", "gestor"))
+        canal = updates.get("canal", current.get("canal", "campo"))
+        if str(rol) == "gestor" and str(canal) == "call":
+            updates["secciones"] = [f"_CALL_{uid}"]
+            updates["seccion"] = ""
+            updates["region"] = ""
+            updates["zona"] = ""
+        return updates
 
     # ── Alertas ──────────────────────────────────────────────────
 
@@ -1162,6 +1434,49 @@ class FirebaseService:
         except Exception as e:
             print(f"Error reading alerts: {e}")
             return []
+
+    def list_casos(self, limit: int = 400) -> list:
+        """List casos de problema ordered by fecha_apertura desc."""
+        if not self._initialized:
+            return []
+        try:
+            docs = (
+                self.db.collection("casos")
+                .order_by("fecha_apertura", direction=BaseQuery.DESCENDING)
+                .limit(limit)
+                .stream()
+            )
+            rows = []
+            for d in docs:
+                data = d.to_dict() or {}
+                data["id"] = d.id
+                fa = data.get("fecha_apertura")
+                if hasattr(fa, "isoformat"):
+                    data["fecha_apertura_str"] = fa.isoformat()
+                elif hasattr(fa, "strftime"):
+                    data["fecha_apertura_str"] = fa.strftime("%Y-%m-%d %H:%M")
+                else:
+                    data["fecha_apertura_str"] = str(fa or "")
+                rows.append(data)
+            return rows
+        except Exception as e:
+            print(f"Error listing casos: {e}")
+            # Fallback without orderBy (index may not exist yet)
+            try:
+                docs = self.db.collection("casos").limit(limit).stream()
+                rows = []
+                for d in docs:
+                    data = d.to_dict() or {}
+                    data["id"] = d.id
+                    rows.append(data)
+                rows.sort(
+                    key=lambda x: str(x.get("fecha_apertura") or ""),
+                    reverse=True,
+                )
+                return rows
+            except Exception as e2:
+                print(f"Error listing casos (fallback): {e2}")
+                return []
 
     def get_pending_alert_count(self) -> int:
         """Return count of pending alerts."""
@@ -1334,6 +1649,7 @@ class FirebaseService:
                         "historial_contacto": historial_contacto,
                         "historial_visitas": historial_visitas,
                         "etiquetas": etiquetas,
+                        "semaforo": str(c.get("semaforo") or ""),
                         "historial_zona": c.get("historial_zona") or [],
                         "motivo_devolucion": c.get("motivo_devolucion", ""),
                         "nota_devolucion": c.get("nota_devolucion", ""),
@@ -1369,6 +1685,8 @@ class FirebaseService:
         campaign_id: str = "cartera_activa",
         tramo_info: dict | None = None,
         progress_callback=None,
+        *,
+        replace_campaign_metadata: bool = True,
     ) -> dict:
         """
         Upload cartera from SQLite data (filtered by section if requested).
@@ -1385,7 +1703,10 @@ class FirebaseService:
         """
         # Delegate to existing upload method which handles visit preservation
         result = self.upload_cartera(
-            by_seccion, campaign_id, progress_callback
+            by_seccion,
+            campaign_id,
+            progress_callback,
+            replace_campaign_metadata=replace_campaign_metadata,
         )
 
         # Optionally store tramo metadata at campaign level
@@ -1430,7 +1751,80 @@ class FirebaseService:
             campaign_id=campaign_id,
             tramo_info=tramo_info,
             progress_callback=progress_callback,
+            replace_campaign_metadata=False,
         )
+
+    def refresh_campaign_section_index(
+        self,
+        campaign_id: str = "cartera_activa",
+    ) -> dict:
+        """Rebuild campaign `secciones` / totals from gestor documents.
+
+        Partial CALL uploads must not replace the full-cartera index.
+        """
+        if not self._initialized:
+            return {"success": False, "errors": ["Firebase no inicializado"]}
+        campaign_ref = self.db.collection("campañas").document(campaign_id)
+        keys: list[str] = []
+        total_clientes = 0
+        total_coords = 0
+        try:
+            for doc in campaign_ref.collection("gestores").stream():
+                keys.append(doc.id)
+                data = doc.to_dict() or {}
+                total_clientes += int(data.get("num_clientes") or 0)
+                total_coords += int(data.get("clientes_con_coordenadas") or 0)
+            keys.sort()
+            campaign_ref.set(
+                {
+                    "secciones": keys,
+                    "total_secciones": len(keys),
+                    "total_clientes": total_clientes,
+                    "total_clientes_con_coordenadas": total_coords,
+                    "fecha_sync": _SERVER_TIMESTAMP,
+                },
+                merge=True,
+            )
+            return {
+                "success": True,
+                "total_secciones": len(keys),
+                "total_clientes": total_clientes,
+            }
+        except Exception as e:
+            return {"success": False, "errors": [str(e)]}
+
+    def delete_gestor_section(
+        self,
+        section_key: str,
+        campaign_id: str = "cartera_activa",
+    ) -> dict:
+        """Delete a gestores/{section_key} document and its clientes."""
+        if not self._initialized:
+            return {"success": False, "deleted_clients": 0, "error": "Firebase no inicializado"}
+        gestor_ref = (
+            self.db.collection("campañas")
+            .document(campaign_id)
+            .collection("gestores")
+            .document(section_key)
+        )
+        deleted = 0
+        try:
+            batch = self.db.batch()
+            count = 0
+            for client_doc in gestor_ref.collection("clientes").stream():
+                batch.delete(client_doc.reference)
+                count += 1
+                deleted += 1
+                if count >= 400:
+                    batch.commit()
+                    batch = self.db.batch()
+                    count = 0
+            if count > 0:
+                batch.commit()
+            gestor_ref.delete()
+            return {"success": True, "deleted_clients": deleted, "error": None}
+        except Exception as e:
+            return {"success": False, "deleted_clients": deleted, "error": str(e)}
 
     # ── Campaign Configuration Sync ──────────────────────────────
 
@@ -1515,13 +1909,21 @@ class FirebaseService:
 
             client_data = old_doc.to_dict()
 
-            # 2. Parse new section components
-            parts = new_seccion_key.split("_")
-            new_region = parts[0] if len(parts) >= 1 else ""
-            new_zona = parts[1] if len(parts) >= 2 else ""
-            new_seccion_letter = parts[2] if len(parts) >= 3 else new_seccion_key
+            is_virtual_dest = (
+                new_seccion_key.startswith("_CALL_")
+                or new_seccion_key.startswith("_POOL")
+                or new_seccion_key.startswith("_GESTION")
+            )
+            if is_virtual_dest:
+                new_region = client_data.get("region") or ""
+                new_zona = client_data.get("zona") or ""
+                new_seccion_letter = client_data.get("seccion") or new_seccion_key
+            else:
+                parts = new_seccion_key.split("_")
+                new_region = parts[0] if len(parts) >= 1 else ""
+                new_zona = parts[1] if len(parts) >= 2 else ""
+                new_seccion_letter = parts[2] if len(parts) >= 3 else new_seccion_key
 
-            # 3. Build zone change log entry
             now = datetime.now().isoformat()
             historial_entry = {
                 "seccion_anterior": current_seccion_key,
@@ -1539,11 +1941,18 @@ class FirebaseService:
             historial.append(historial_entry)
 
             # 4. Update client data with new section info
-            client_data["seccion"] = new_seccion_letter
             client_data["seccion_key"] = new_seccion_key
-            client_data["region"] = new_region
-            client_data["zona"] = new_zona
             client_data["historial_zona"] = historial
+            if not is_virtual_dest:
+                client_data["seccion"] = new_seccion_letter
+                client_data["region"] = new_region
+                client_data["zona"] = new_zona
+            if new_seccion_key.startswith("_CALL_"):
+                dest_uid = new_seccion_key[len("_CALL_"):]
+                if dest_uid:
+                    client_data["call_gestor_uid"] = dest_uid
+                    if not extra_fields or "call_gestor_nombre" not in extra_fields:
+                        client_data.setdefault("call_gestor_nombre", dest_uid)
 
             if extra_fields:
                 client_data.update(extra_fields)
@@ -1605,6 +2014,33 @@ class FirebaseService:
 
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def list_section_clients(
+        self,
+        section_key: str,
+        campaign_id: str = "cartera_activa",
+    ) -> list[dict]:
+        """Lista documentos de clientes en una sección Firestore."""
+        if not self._initialized or not section_key:
+            return []
+        try:
+            snap = (
+                self.db.collection("campañas")
+                .document(campaign_id)
+                .collection("gestores")
+                .document(section_key)
+                .collection("clientes")
+                .stream()
+            )
+            rows = []
+            for doc in snap:
+                data = doc.to_dict() or {}
+                data["id"] = doc.id
+                data.setdefault("codigo_cliente", doc.id)
+                rows.append(data)
+            return rows
+        except Exception:
+            return []
 
     def list_pending_returns(self, campaign_id: str = "cartera_activa") -> list:
         """List clients with estado_gestion=devolucion_pendiente across all sections."""
@@ -2141,8 +2577,12 @@ class FirebaseService:
         preserved = 0
         archived = 0
         errors = []
+        self._clear_visit_section_cache()
+        claimed = False
 
         try:
+            self._claim_publisher_lock("desktop")
+            claimed = True
             campaign_ref = self.db.collection("campañas").document(campaign_id)
 
             for seccion_key, section_changes in change_report.sections.items():
@@ -2150,7 +2590,7 @@ class FirebaseService:
                     continue
 
                 # Read existing visit data to preserve
-                existing_visits = self._read_existing_visit_data(
+                existing_visits = self._visits_for_section(
                     campaign_ref, seccion_key
                 )
 
@@ -2336,6 +2776,11 @@ class FirebaseService:
 
         except Exception as e:
             errors.append(str(e))
+        finally:
+            if claimed:
+                self._release_publisher_lock(
+                    "desktop", "listo" if not errors else "error"
+                )
 
         return {
             "campaign_id": campaign_id,
@@ -2375,6 +2820,117 @@ class FirebaseService:
         except Exception as e:
             print(f"Error creating admin alert: {e}")
             return False
+
+    def migrate_pending_alerts_to_casos(self) -> dict:
+        """Convert pending suplantacion/pago_no_registrado alerts into casos.
+
+        Skips if an open caso already exists for the same campaña+cliente+tipo.
+        Marks migrated alerts as revisada.
+        """
+        if not self._initialized:
+            raise RuntimeError("Firebase no está inicializado.")
+
+        tipos = ("suplantacion", "pago_no_registrado")
+        created = 0
+        skipped = 0
+        marked = 0
+        errors: list[str] = []
+
+        try:
+            snap = (
+                self.db.collection("alertas")
+                .where("estado_alerta", "==", "pendiente")
+                .limit(500)
+                .stream()
+            )
+            for doc in snap:
+                data = doc.to_dict() or {}
+                tipo = (data.get("tipo") or "").strip()
+                if tipo not in tipos:
+                    continue
+                campania = (
+                    data.get("campaña_id")
+                    or data.get("campaign_id")
+                    or "cartera_activa"
+                )
+                cliente_id = (
+                    data.get("cliente_id")
+                    or data.get("cliente_codigo")
+                    or ""
+                )
+                if not cliente_id:
+                    skipped += 1
+                    continue
+
+                existing = list(
+                    self.db.collection("casos")
+                    .where("campaña_id", "==", campania)
+                    .where("cliente_id", "==", cliente_id)
+                    .where("tipo", "==", tipo)
+                    .where("abierto", "==", True)
+                    .limit(1)
+                    .stream()
+                )
+                if existing:
+                    skipped += 1
+                else:
+                    gps = data.get("gps") or {}
+                    lat = data.get("gps_latitud")
+                    lng = data.get("gps_longitud")
+                    if lat is None and isinstance(gps, dict):
+                        lat = gps.get("latitude")
+                    if lng is None and isinstance(gps, dict):
+                        lng = gps.get("longitude")
+                    self.db.collection("casos").add({
+                        "tipo": tipo,
+                        "etapa": "nuevo",
+                        "abierto": True,
+                        "campaña_id": campania,
+                        "seccion": data.get("seccion", ""),
+                        "seccion_key": data.get("seccion", ""),
+                        "cliente_id": cliente_id,
+                        "cliente_codigo": data.get("cliente_codigo") or cliente_id,
+                        "cliente_nombre": data.get("cliente_nombre", ""),
+                        "cliente_dni": data.get("cliente_dni", ""),
+                        "telefono": "",
+                        "direccion": "",
+                        "distrito": "",
+                        "deuda_asignada": float(data.get("cliente_deuda") or 0),
+                        "deuda_pendiente": float(data.get("cliente_deuda") or 0),
+                        "campana_banco": "",
+                        "nota_origen": data.get("nota", ""),
+                        "gps_latitud": lat,
+                        "gps_longitud": lng,
+                        "gestor_uid": "",
+                        "gestor_nombre": data.get("gestor_nombre", ""),
+                        "gestor_email": data.get("gestor_email", ""),
+                        "fecha_apertura": data.get("fecha") or _SERVER_TIMESTAMP,
+                        "fecha_etapa": _SERVER_TIMESTAMP,
+                        "actualizado_por_uid": "migration",
+                        "actualizado_por_nombre": "Migración alertas",
+                        "migrado_desde_alerta": doc.id,
+                    })
+                    created += 1
+
+                try:
+                    doc.reference.update({
+                        "estado_alerta": "revisada",
+                        "fecha_revision": _SERVER_TIMESTAMP,
+                        "migrado_a_caso": True,
+                    })
+                    marked += 1
+                except Exception as e:
+                    errors.append(f"alerta {doc.id}: {e}")
+        except Exception as e:
+            errors.append(str(e))
+
+        return {
+            "created": created,
+            "skipped": skipped,
+            "marked": marked,
+            "errors": errors,
+            "success": len(errors) == 0,
+        }
 
     # ── Admin inbox (notificaciones back-office) ─────────────────
 
@@ -2961,6 +3517,30 @@ class FirebaseService:
             return True
         except Exception as e:
             print(f"Error updating client etiquetas: {e}")
+            return False
+
+    def update_client_semaforo_firestore(
+        self,
+        campaign_id: str,
+        seccion_key: str,
+        codigo_cliente: str,
+        semaforo: str,
+    ) -> bool:
+        """Push semáforo update for a single client to Firestore."""
+        if not self._initialized:
+            return False
+        try:
+            from .semaforo import normalize_semaforo
+            value = normalize_semaforo(semaforo)
+            ref = (
+                self.db.collection("campañas").document(campaign_id)
+                .collection("gestores").document(seccion_key)
+                .collection("clientes").document(codigo_cliente)
+            )
+            ref.update({"semaforo": value})
+            return True
+        except Exception as e:
+            print(f"Error updating client semaforo: {e}")
             return False
 
     # ── Full Cartera Download (for new PC / full sync) ───────────

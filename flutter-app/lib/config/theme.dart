@@ -43,6 +43,8 @@ class AppTheme {
   static const Color statusSuplantacion = Color(0xFFE11D48);
   static const Color statusPagoNoReg = Color(0xFF3B82F6);
   static const Color statusPagoNoRegistrado = Color(0xFF3B82F6);
+  static const Color statusNoHizoPedido = Color(0xFFEA580C);
+  static const Color statusCompletoPedidoSocia = Color(0xFF0D9488);
 
   // Aliases used across screens
   static const Color primaryColor = primary;
@@ -65,6 +67,10 @@ class AppTheme {
         return statusSuplantacion;
       case 'pago_no_registrado':
         return statusPagoNoReg;
+      case 'no_hizo_pedido':
+        return statusNoHizoPedido;
+      case 'completo_pedido_socia':
+        return statusCompletoPedidoSocia;
       case 'devolucion_pendiente':
         return const Color(0xFF7C3AED);
       case 'pendiente':

@@ -19,13 +19,16 @@ import '../widgets/stats/contact_response_card.dart';
 import '../widgets/stats/gestor_ranking_preview.dart';
 import '../widgets/stats/stats_shared_sections.dart';
 import '../widgets/stats/virtual_channel_bars.dart';
+import 'bitacora_campo_screen.dart';
 import 'client_map_screen.dart';
 import 'client_search_screen.dart';
+import 'gestor_activity_screen.dart';
 import 'notifications_screen.dart';
 import 'stats_screen.dart';
 import 'tracking_screen.dart';
 import 'etiquetas_admin_screen.dart';
 import 'reassignment_screen.dart';
+import 'cartera_upload_screen.dart';
 
 class AdminDashboardScreen extends StatefulWidget {
   const AdminDashboardScreen({super.key});
@@ -41,6 +44,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   final _notificationService = NotificationService();
 
   bool _loading = true;
+  String? _loadError;
   CampaignStats? _stats;
   Map<String, dynamic>? _campaignData;
   String? _campaignId;
@@ -80,44 +84,104 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
   }
 
   Future<void> _loadData({bool forceRefresh = false}) async {
-    setState(() => _loading = true);
-
-    final campaignId = await _campaignService.getActiveCampaignId();
-    if (campaignId == null) {
-      if (mounted) setState(() => _loading = false);
-      return;
+    if (forceRefresh) {
+      _statsService.clearCache();
     }
-    if (!mounted) return;
-
-    _campaignId = campaignId;
-    _campaignData = await _campaignService.getCampaignData(campaignId);
-
-    final allClients = await _statsService.loadActiveClients(
-      campaignId: campaignId,
-    );
-    if (mounted) {
-      context.read<CampanaBancoFilterNotifier>().updateAvailable(allClients);
-    }
-
-    final campanaFilter =
-        context.read<CampanaBancoFilterNotifier>().selected;
-
-    final stats = await _statsService.loadForCampaign(
-      campaignId: campaignId,
-      campanaBancoFilter: campanaFilter,
-      forceRefresh: forceRefresh,
-    );
-
-    final gestores = await _firestoreService.getGestoresActivos();
-    final pendingReturns = await _firestoreService.listPendingReturns(campaignId);
-
-    if (!mounted) return;
     setState(() {
-      _stats = stats;
-      _gestoresActivosCount = gestores.length;
-      _pendingReturnsCount = pendingReturns.length;
-      _loading = false;
+      _loading = true;
+      _loadError = null;
     });
+
+    try {
+      // Timeout global: si Firestore web se cuelga (WebChannel bloqueado),
+      // mostramos error con Reintentar en vez de spinner infinito.
+      await _loadDataInner(forceRefresh: forceRefresh).timeout(
+        const Duration(seconds: 60),
+      );
+    } catch (e, st) {
+      debugPrint('AdminDashboard _loadData: $e\n$st');
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _loadError = e.toString();
+      });
+    }
+  }
+
+  Future<void> _loadDataInner({bool forceRefresh = false}) async {
+    try {
+      final campaignId = await _campaignService
+          .getActiveCampaignId()
+          .timeout(const Duration(seconds: 20));
+      if (campaignId == null) {
+        if (mounted) setState(() => _loading = false);
+        return;
+      }
+      if (!mounted) return;
+
+      _campaignId = campaignId;
+      _campaignData = await _campaignService
+          .getCampaignData(campaignId)
+          .timeout(const Duration(seconds: 20));
+
+      final allClients = await _statsService
+          .loadActiveClients(
+            campaignId: campaignId,
+          )
+          .timeout(const Duration(seconds: 45));
+      if (!mounted) return;
+      context.read<CampanaBancoFilterNotifier>().updateAvailable(allClients);
+      final campanaFilter =
+          context.read<CampanaBancoFilterNotifier>().selected;
+
+      final stats = await _statsService
+          .loadForCampaign(
+            campaignId: campaignId,
+            campanaBancoFilter: campanaFilter,
+            forceRefresh: forceRefresh,
+          )
+          .timeout(const Duration(seconds: 45));
+
+      // Gestores y devoluciones en paralelo, cada uno con su timeout para
+      // no bloquear el panel si una sola lectura se atasca.
+      var pendingCount = 0;
+      var gestoresLength = 0;
+      try {
+        final results = await Future.wait([
+          _firestoreService
+              .getGestoresActivos()
+              .timeout(
+                const Duration(seconds: 20),
+                onTimeout: () => [],
+              ),
+          _firestoreService
+              .listPendingReturns(campaignId)
+              .timeout(
+                const Duration(seconds: 20),
+                onTimeout: () => [],
+              ),
+        ]);
+        gestoresLength = (results[0] as List).length;
+        pendingCount = (results[1] as List).length;
+      } catch (e) {
+        debugPrint('AdminDashboard gestores/pending: $e');
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _stats = stats;
+        _gestoresActivosCount = gestoresLength;
+        _pendingReturnsCount = pendingCount;
+        _loading = false;
+      });
+    } catch (e, st) {
+      debugPrint('AdminDashboard _loadData: $e\n$st');
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _loadError = e.toString();
+      });
+    }
   }
 
   void _openStatsTab(int tabIndex) {
@@ -226,7 +290,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                       color: AppTheme.primaryColor,
                     ),
                   )
-                : stats == null || stats.total == 0
+                : _loadError != null
+                    ? _buildLoadError()
+                    : stats == null || stats.total == 0
                     ? _buildEmpty()
                     : RefreshIndicator(
                         color: AppTheme.primaryColor,
@@ -362,6 +428,18 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
               runSpacing: 8,
               children: [
                 _actionChip(
+                  Icons.upload_file,
+                  'Cargar cartera',
+                  () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const CarteraUploadScreen(),
+                      ),
+                    );
+                  },
+                ),
+                _actionChip(
                   Icons.swap_horiz,
                   _pendingReturnsCount > 0
                       ? 'Reasignar ($_pendingReturnsCount)'
@@ -379,6 +457,30 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                   Icons.bar_chart,
                   'Estadísticas',
                   () => _openStatsTab(0),
+                ),
+                _actionChip(
+                  Icons.timeline,
+                  'Actividad',
+                  () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const GestorActivityScreen(),
+                      ),
+                    );
+                  },
+                ),
+                _actionChip(
+                  Icons.menu_book_outlined,
+                  'Bitácora',
+                  () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const BitacoraCampoScreen(),
+                      ),
+                    );
+                  },
                 ),
                 _actionChip(
                   Icons.groups,
@@ -442,6 +544,42 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     );
   }
 
+  Widget _buildLoadError() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.cloud_off_outlined,
+                size: 48, color: Colors.grey.shade400),
+            const SizedBox(height: 12),
+            Text(
+              'No se pudo cargar el panel',
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                color: Colors.grey.shade700,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'La conexión con Firestore se cortó al leer la cartera. '
+              'Vuelve a intentar.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey.shade600, height: 1.35),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: () => _loadData(forceRefresh: true),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Reintentar'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildEmpty() {
     return Center(
       child: Padding(
@@ -458,6 +596,25 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                 fontWeight: FontWeight.w600,
                 color: Colors.grey.shade700,
               ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Carga el Excel del banco para publicar la cartera a los gestores.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey.shade600, height: 1.35),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const CarteraUploadScreen(),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.upload_file),
+              label: const Text('Cargar cartera'),
             ),
           ],
         ),

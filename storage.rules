@@ -20,11 +20,35 @@ service firebase.storage {
     }
 
     function isActiveUser() {
-      return isAuth() && getUserDoc().activo == true;
+      // Alineado con firestore.rules y UserModel: `activo` ausente = activo.
+      // (Antes exigía `activo == true` y bloqueaba la subida de fotos/audios
+      // a usuarios legacy sin ese campo, mientras Firestore sí los dejaba
+      // crear el descargo → el botón "Guardar descargo" fallaba solo con adjuntos.)
+      return isAuth()
+        && firestore.exists(
+          /databases/(default)/documents/usuarios/$(request.auth.uid)
+        )
+        && getUserDoc().activo != false;
     }
 
     function getUserSections() {
       return getUserDoc().secciones;
+    }
+
+    // Excel del banco y JSON parseado (solo admin/supervisor dueño del path).
+    match /cartera_uploads/{userId}/{jobId}/{fileName} {
+      allow read, delete: if isAdminOrSupervisor()
+        && request.auth.uid == userId;
+      allow write: if isAdminOrSupervisor()
+        && request.auth.uid == userId
+        && request.resource.size < 50 * 1024 * 1024
+        && (
+          request.resource.contentType == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+          || request.resource.contentType == 'application/vnd.ms-excel.sheet.macroEnabled.12'
+          || request.resource.contentType == 'application/gzip'
+          || request.resource.contentType == 'application/octet-stream'
+          || request.resource.contentType == 'application/vnd.ms-excel'
+        );
     }
 
     // Path esperado:
@@ -58,6 +82,47 @@ service firebase.storage {
         && request.resource.size < 10 * 1024 * 1024
         && request.resource.contentType
           == 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    }
+
+    // Imágenes Doxeo subidas por el worker TWI (Admin SDK).
+    match /doxeo_jobs/{jobId}/{allPaths=**} {
+      function canReadDoxeoJob() {
+        let job = firestore.get(
+          /databases/(default)/documents/doxeo_jobs/$(jobId)
+        ).data;
+        return isAdminOrSupervisor()
+          || job.solicitante.uid == request.auth.uid
+          || (
+            job.cliente.seccion_key is string
+            && job.cliente.seccion_key in getUserSections()
+          );
+      }
+      allow read: if isActiveUser() && canReadDoxeoJob();
+      allow write: if false;
+    }
+
+    // Evidencias de descargos (foto/audio desde el APK):
+    // descargos_evidencias/{campaignId}/{seccionKey}/{clientId}/{fileName}
+    match /descargos_evidencias/{campaignId}/{seccionKey}/{clientId}/{fileName} {
+      allow write: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || (
+          getUserSections() is list
+          && seccionKey in getUserSections()
+        )
+      )
+      && request.resource.size < 15 * 1024 * 1024
+      && (
+        request.resource.contentType.matches('image/.*')
+        || request.resource.contentType.matches('audio/.*')
+      );
+      allow read: if isActiveUser() && (
+        isAdminOrSupervisor()
+        || (
+          getUserSections() is list
+          && seccionKey in getUserSections()
+        )
+      );
     }
   }
 }

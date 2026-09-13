@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import '../utils/responsive.dart';
 import 'admin_screen.dart';
+import 'cartera_upload_screen.dart';
 import 'etiquetas_admin_screen.dart';
 import 'client_map_screen.dart';
 import 'my_routes_screen.dart';
 import 'tracking_screen.dart';
+import 'whatsapp_plantillas_screen.dart';
 
 class MoreScreen extends StatelessWidget {
   final bool canManageUsers;
@@ -45,6 +47,13 @@ class MoreScreen extends StatelessWidget {
         ),
       if (canManageUsers)
         _ModuleInfo(
+          icon: Icons.upload_file_outlined,
+          title: 'Cargar cartera',
+          subtitle: 'Excel del banco y publicación a gestores',
+          page: const CarteraUploadScreen(),
+        ),
+      if (canManageUsers)
+        _ModuleInfo(
           icon: Icons.admin_panel_settings_outlined,
           title: 'Administración',
           subtitle: 'Usuarios y roles',
@@ -56,6 +65,13 @@ class MoreScreen extends StatelessWidget {
           title: 'Etiquetas',
           subtitle: 'Catálogo global para gestores',
           page: const EtiquetasAdminScreen(),
+        ),
+      if (canManageUsers)
+        _ModuleInfo(
+          icon: Icons.chat,
+          title: 'Mensajes WhatsApp',
+          subtitle: 'Plantillas personales y de empresa',
+          page: const WhatsAppPlantillasScreen(),
         ),
     ];
 

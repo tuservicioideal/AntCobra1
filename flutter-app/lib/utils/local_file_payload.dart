@@ -6,9 +6,11 @@ class LocalFilePayload {
     required this.bytes,
     required this.name,
     this.path,
+    this.mimeType,
   });
 
   final Uint8List bytes;
   final String name;
   final String? path;
+  final String? mimeType;
 }

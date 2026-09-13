@@ -37,6 +37,8 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
   String? _campaignId;
   String? _selectedClientId;
   Timer? _debounce;
+  final _listScrollController = ScrollController();
+  static const int _maxResults = 500;
 
   @override
   void initState() {
@@ -55,6 +57,7 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
     _debounce?.cancel();
     _searchController.removeListener(_onSearchChanged);
     _searchController.dispose();
+    _listScrollController.dispose();
     super.dispose();
   }
 
@@ -78,6 +81,14 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
     }
   }
 
+  void _scrollToTop() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_listScrollController.hasClients) {
+        _listScrollController.jumpTo(0);
+      }
+    });
+  }
+
   void _onSearchChanged() {
     _debounce?.cancel();
     _debounce = Timer(const Duration(milliseconds: 300), () async {
@@ -92,6 +103,7 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
           _pagination.reset();
           _selectedClientId = null;
         });
+        _scrollToTop();
       }
     });
   }
@@ -103,6 +115,10 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
         .where((c) => clientMatchesSearchQuery(c, _query))
         .toList()
       ..sort((a, b) => a.displayName.compareTo(b.displayName));
+    // Tope de seguridad: evita ordenar/paginar miles de filas en gama baja.
+    if (results.length > _maxResults) {
+      return results.sublist(0, _maxResults);
+    }
     return results;
   }
 
@@ -128,10 +144,12 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
 
   Widget _buildResultsHeader(int count) {
     if (_query.length < 2) return const SizedBox.shrink();
+    final capped = count >= _maxResults;
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
       child: Text(
         '$count resultado${count == 1 ? '' : 's'}'
+        '${capped ? ' (primeros $_maxResults, afina la búsqueda)' : ''}'
         '${_pagination.needsBar ? ' · pág. ${_pagination.page + 1}/${_pagination.totalPages}' : ''}',
         style: TextStyle(fontSize: 12, color: Colors.grey.shade600),
       ),
@@ -140,8 +158,6 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
 
   Widget _buildResultsList({
     required List<ClientModel> pageResults,
-    required bool showFilterBar,
-    required String? campanaFilter,
   }) {
     if (_query.length < 2) {
       return Center(
@@ -172,14 +188,19 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
     }
 
     return ListView.builder(
+      controller: _listScrollController,
+      cacheExtent: 600,
+      addAutomaticKeepAlives: false,
+      addRepaintBoundaries: true,
+      addSemanticIndexes: false,
       itemCount: pageResults.length,
       itemBuilder: (context, index) {
         final client = pageResults[index];
         return ClientListTile(
+          key: ValueKey(client.id),
           client: client,
           isSelected: _selectedClientId == client.id,
           showChevron: !context.isExpanded,
-          showCampanaBadge: showFilterBar && campanaFilter == null,
           onTap: () => _openClient(client),
         );
       },
@@ -191,8 +212,6 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
     final campanaFilter = context.watch<CampanaBancoFilterNotifier>().selected;
     final results = _filteredResults(campanaFilter);
     final pageResults = _pagination.slice(results);
-    final showFilterBar =
-        context.watch<CampanaBancoFilterNotifier>().showFilterBar;
 
     ClientModel? selectedClient;
     if (_selectedClientId != null) {
@@ -231,8 +250,6 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
           )
         : _buildResultsList(
             pageResults: pageResults,
-            showFilterBar: showFilterBar,
-            campanaFilter: campanaFilter,
           );
 
     return Scaffold(
@@ -245,8 +262,10 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
                   Expanded(child: listBody),
                   ClientListPaginationBar(
                     pagination: _pagination,
-                    onPageChanged: (page) =>
-                        setState(() => _pagination.goTo(page)),
+                    onPageChanged: (page) {
+                      setState(() => _pagination.goTo(page));
+                      _scrollToTop();
+                    },
                   ),
                 ],
               ),
@@ -274,8 +293,10 @@ class _ClientSearchScreenState extends State<ClientSearchScreen> {
                 Expanded(child: listBody),
                 ClientListPaginationBar(
                   pagination: _pagination,
-                  onPageChanged: (page) =>
-                      setState(() => _pagination.goTo(page)),
+                  onPageChanged: (page) {
+                    setState(() => _pagination.goTo(page));
+                    _scrollToTop();
+                  },
                 ),
               ],
             ),

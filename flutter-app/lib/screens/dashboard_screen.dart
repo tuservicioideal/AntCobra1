@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:provider/provider.dart';
 import '../config/theme.dart';
+import '../models/campaign_config_model.dart';
 import '../models/client_model.dart';
 import '../models/notification_model.dart';
+import '../models/semaforo.dart';
 import '../services/auth_service.dart';
 import '../services/campana_banco_filter_notifier.dart';
 import '../services/campaign_service.dart';
@@ -19,10 +22,15 @@ import '../services/location_service.dart';
 import '../services/tracking_service.dart';
 import '../services/etiqueta_catalog_service.dart';
 import '../utils/campana_banco_utils.dart';
+import '../utils/cierre_filter.dart';
+import '../utils/tramo_filter.dart';
+import '../utils/firestore_web_guard.dart';
+import '../utils/section_utils.dart';
 import '../utils/client_list_pagination.dart';
 import '../utils/client_proximity_sort.dart';
 import '../utils/local_file_payload.dart';
 import '../widgets/campana_banco_filter_bar.dart';
+import '../widgets/cierre_filter_sheet.dart';
 import '../widgets/stat_card.dart';
 import '../widgets/client_list_tile.dart';
 import '../widgets/client_list_pagination_bar.dart';
@@ -72,13 +80,26 @@ class _DashboardScreenState extends State<DashboardScreen> {
   bool _loading = true;
   String _filter = 'all'; // all, pendiente, visitado
   final Set<String> _etiquetaFilter = {};
+  final Set<String> _semaforoFilter = {};
+  Set<int> _tramoFilter = {};
+  CierreFilter _cierreFilter = CierreFilter.none;
+  int _duracionDias = 59;
   String _searchQuery = '';
   bool _isGestorRole = true;
   double? _sortOriginLat;
   double? _sortOriginLng;
   final _pagination = ClientListPagination();
+  final _listScrollController = ScrollController();
+  final _mobileScrollController = ScrollController();
+  Timer? _searchDebounce;
+  // Cache del filtrado para no recalcular en cada build (la lista puede
+  // tener miles de clientes y el sort por proximidad es costoso).
+  List<ClientModel>? _filteredCache;
+  String _filteredCacheKey = '';
+  int _clientsIdentity = 0;
   String? _selectedClientId;
-  bool _tableView = false;
+  bool _tableView = true;
+  bool _templatesPrefetched = false;
 
   CampanaBancoFilterNotifier? _campanaFilterNotifier;
   StreamSubscription<List<ClientModel>>? _clientsSub;
@@ -105,19 +126,53 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void _onCampanaFilterChanged() {
     if (mounted) {
       _pagination.reset();
+      _filteredCache = null;
       setState(() {});
     }
   }
 
+  void _invalidateFilterCache() {
+    _filteredCache = null;
+  }
+
   void _resetPagination() {
     _pagination.reset();
+    _invalidateFilterCache();
+    _scrollListToTop();
+  }
+
+  void _scrollListToTop() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_listScrollController.hasClients) {
+        _listScrollController.jumpTo(0);
+      }
+      if (_mobileScrollController.hasClients) {
+        _mobileScrollController.jumpTo(0);
+      }
+    });
+  }
+
+  void _onSearchChangedDebounced(String value) {
+    _searchDebounce?.cancel();
+    _searchDebounce = Timer(const Duration(milliseconds: 350), () {
+      if (!mounted) return;
+      setState(() {
+        _searchQuery = value;
+        _pagination.reset();
+        _invalidateFilterCache();
+      });
+      _scrollListToTop();
+    });
   }
 
   @override
   void dispose() {
     _clientsSub?.cancel();
     _campanaFilterNotifier?.removeListener(_onCampanaFilterChanged);
+    _searchDebounce?.cancel();
     _searchController.dispose();
+    _listScrollController.dispose();
+    _mobileScrollController.dispose();
     super.dispose();
   }
 
@@ -136,13 +191,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     _campaignId = campaignId;
     _campaignData = await _campaignService.getCampaignData(campaignId);
-    unawaited(_letterTemplateCache.prefetchTemplates());
+
+    try {
+      final cfgDoc = await FirebaseFirestore.instance
+          .collection('configuracion')
+          .doc('campana')
+          .get();
+      final cfg = CampaignConfigModel.fromMap(cfgDoc.data());
+      _duracionDias = cfg.duracionDias > 0 ? cfg.duracionDias : 59;
+    } catch (_) {
+      _duracionDias = 59;
+    }
 
     // Load territorial catalog for hierarchical section display
     _catalog = await _firestoreService.getEstructuraTerritorial();
 
-    // 2. Discover section(s) — prefer secciones array (composite keys)
-    final List<String> profileSecciones = profile?.secciones ?? [];
+    // 2. Discover section(s) — call usa _CALL_{uid}; campo usa secciones.
+    final List<String> profileSecciones = resolveGestorSectionKeys(profile);
     String? section = profile?.seccion;
     _gestorSecciones = profileSecciones;
     _sectionFilter = null; // reset filter on reload
@@ -186,7 +251,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
     final auth = context.read<AuthService>();
     final profile = auth.profile;
     final isGestor = profile?.isGestor ?? false;
-    final profileSecciones = profile?.secciones ?? [];
+    final profileSecciones = resolveGestorSectionKeys(profile);
 
     final List<String> sections;
     if (isGestor && profileSecciones.isNotEmpty) {
@@ -204,12 +269,22 @@ class _DashboardScreenState extends State<DashboardScreen> {
         .listen((clients) {
       if (!mounted) return;
       _clients = clients;
+      _clientsIdentity = identityHashCode(clients);
+      _filteredCache = null;
       context.read<CampanaBancoFilterNotifier>().updateAvailable(_clients);
       setState(() => _loading = false);
+      _prefetchTemplatesOnce();
     }, onError: (e) {
       debugPrint('Client stream error: $e');
+      maybeReloadForFirestoreAssertion(e);
       if (mounted) setState(() => _loading = false);
     });
+  }
+
+  void _prefetchTemplatesOnce() {
+    if (_templatesPrefetched) return;
+    _templatesPrefetched = true;
+    unawaited(_letterTemplateCache.prefetchTemplates());
   }
 
   Future<void> _refreshSortOrigin() async {
@@ -241,6 +316,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
       context.read<AuthService>().profile?.isCallGestor ?? false;
 
   List<ClientModel> _filteredClients(String? campanaFilter) {
+    final isCall = _isCallGestor;
+    final key = StringBuffer()
+      ..write(campanaFilter ?? '')
+      ..write('|$_sectionFilter|$_filter|')
+      ..write(_etiquetaFilter.join(','))
+      ..write('|')
+      ..write(_semaforoFilter.join(','))
+      ..write('|$_searchQuery|$_clientsIdentity|')
+      ..write('$_sortOriginLat,$_sortOriginLng|')
+      ..write('$_isGestorRole|$isCall|')
+      ..write('${tramoFilterCacheKey(_tramoFilter)}|')
+      ..write('${_cierreFilter.cacheKey}|$_duracionDias');
+    final keyStr = key.toString();
+    if (_filteredCache != null && _filteredCacheKey == keyStr) {
+      return _filteredCache!;
+    }
+    final result = _computeFilteredClients(campanaFilter, isCall);
+    _filteredCache = result;
+    _filteredCacheKey = keyStr;
+    return result;
+  }
+
+  List<ClientModel> _computeFilteredClients(
+      String? campanaFilter, bool isCallGestor) {
     var list = _clients.where((c) => c.isActiveForGestor).toList();
     list = applyCampanaBancoFilter(list, campanaFilter);
 
@@ -264,6 +363,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }).toList();
     }
 
+    if (_semaforoFilter.isNotEmpty) {
+      list = list.where((c) {
+        final key = normalizeSemaforo(c.semaforo);
+        if (key.isEmpty) {
+          return _semaforoFilter.contains(kSemaforoSinClasificar);
+        }
+        return _semaforoFilter.contains(key);
+      }).toList();
+    }
+
+    if (_tramoFilter.isNotEmpty) {
+      list = applyTramoFilter(list, _tramoFilter);
+    }
+
+    // Filtro por fecha de cierre / días restantes
+    if (_cierreFilter.isActive) {
+      list = applyCierreFilter(
+        list,
+        _cierreFilter,
+        now: DateTime.now(),
+        duracionDias: _duracionDias,
+      );
+    }
+
     // Apply search
     if (_searchQuery.isNotEmpty) {
       list = list
@@ -271,7 +394,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
           .toList();
     }
 
-    if (_isCallGestor) {
+    if (_cierreFilter.isActive) {
+      list = sortClientsByCierre(list, duracionDias: _duracionDias);
+    } else if (isCallGestor) {
       list.sort((a, b) {
         if (a.isPendiente != b.isPendiente) {
           return a.isPendiente ? -1 : 1;
@@ -281,12 +406,28 @@ class _DashboardScreenState extends State<DashboardScreen> {
     } else if (_isGestorRole &&
         _sortOriginLat != null &&
         _sortOriginLng != null) {
-      list = sortClientsByProximity(
-        list,
-        originLat: _sortOriginLat!,
-        originLng: _sortOriginLng!,
-        pendingFirst: true,
-      );
+      // Solo ordena por proximidad los primeros 500 para no bloquear la UI;
+      // el resto mantiene orden por deuda (la paginación muestra 30 por vez).
+      const maxProximitySort = 500;
+      final needsProximity = list.length <= maxProximitySort ||
+          _searchQuery.isNotEmpty ||
+          _filter != 'all' ||
+          _tramoFilter.isNotEmpty;
+      if (needsProximity) {
+        list = sortClientsByProximity(
+          list,
+          originLat: _sortOriginLat!,
+          originLng: _sortOriginLng!,
+          pendingFirst: true,
+        );
+      } else {
+        list.sort((a, b) {
+          if (a.isPendiente != b.isPendiente) {
+            return a.isPendiente ? -1 : 1;
+          }
+          return b.importeDeudaPendiente.compareTo(a.importeDeudaPendiente);
+        });
+      }
     }
 
     return list;
@@ -346,7 +487,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               Text(
                 campanaSubtitle ??
                     (isCallGestor
-                        ? 'Mi cartera · ${_totalClients(sectionClients)} cuentas'
+                        ? 'Mi cartera · ${_totalClients(sectionClients)} · '
+                            'S/ ${_montoCartera(sectionClients).toStringAsFixed(0)}'
                         : _sectionFilter != null
                             ? _geoLabel(_sectionFilter!)
                             : _gestorSecciones.length > 1
@@ -468,6 +610,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               color: AppTheme.primaryColor,
               onRefresh: _loadData,
               child: CustomScrollView(
+                controller: _mobileScrollController,
+                cacheExtent: 600,
                 slivers: _buildDashboardSlivers(
                   isCallGestor: isCallGestor,
                   sectionClients: sectionClients,
@@ -494,10 +638,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
         SliverToBoxAdapter(
           child: _buildCallCenterBanner(sectionClients),
         ),
-      if (_campaignData != null && !isCallGestor)
-        SliverToBoxAdapter(
-          child: TramoProgressBar(clients: sectionClients),
+      SliverToBoxAdapter(
+        child: TramoProgressBar(
+          clients: sectionClients,
+          selectedTramos: _tramoFilter,
+          onTramoTap: _toggleTramoFilter,
         ),
+      ),
       SliverToBoxAdapter(
         child: isCallGestor
             ? _buildCallStatsRow(sectionClients, compact: false)
@@ -528,13 +675,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
               index: index,
             ),
             childCount: pageClients.length,
+            addAutomaticKeepAlives: false,
+            addRepaintBoundaries: true,
+            addSemanticIndexes: false,
           ),
         ),
       if (filteredClients.isNotEmpty)
         SliverToBoxAdapter(
           child: ClientListPaginationBar(
             pagination: _pagination,
-            onPageChanged: (page) => setState(() => _pagination.goTo(page)),
+            onPageChanged: (page) => setState(() {
+              _pagination.goTo(page);
+              _scrollListToTop();
+            }),
           ),
         ),
       const SliverToBoxAdapter(child: SizedBox(height: 20)),
@@ -557,53 +710,81 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     return MasterDetailScaffold(
-      header: SingleChildScrollView(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (isCallGestor) _buildCallCenterBanner(sectionClients),
-            if (_campaignData != null && !isCallGestor)
-              TramoProgressBar(clients: sectionClients),
-            isCallGestor
-                ? _buildCallStatsRow(sectionClients, compact: true)
-                : _buildStatsRow(sectionClients, compact: true),
-            CampanaBancoFilterBar(
-              available: campanaFilterNotifier.available,
-              selected: campanaFilter,
-              onSelected: campanaFilterNotifier.select,
-            ),
-            _buildSearchAndFilter(filteredClients),
-          ],
-        ),
+      masterFlex: 5,
+      detailFlex: 3,
+      header: _buildDesktopToolbar(
+        isCallGestor: isCallGestor,
+        sectionClients: sectionClients,
+        filteredClients: filteredClients,
+        campanaFilterNotifier: campanaFilterNotifier,
+        campanaFilter: campanaFilter,
       ),
-      master: RefreshIndicator(
-        color: AppTheme.primaryColor,
-        onRefresh: _loadData,
-        child: filteredClients.isEmpty
-            ? ListView(children: [_buildEmptyState()])
-            : Column(
-                children: [
-                  if (_tableView) _buildTableHeader(isCallGestor),
-                  Expanded(
-                    child: ListView.builder(
-                      itemCount: pageClients.length,
-                      itemBuilder: (context, index) => _buildClientListItem(
-                        pageClients[index],
-                        isCallGestor: isCallGestor,
-                        campanaFilterNotifier: campanaFilterNotifier,
-                        campanaFilter: campanaFilter,
-                        index: index,
-                        tableView: _tableView,
-                      ),
-                    ),
-                  ),
-                  ClientListPaginationBar(
-                    pagination: _pagination,
-                    onPageChanged: (page) =>
-                        setState(() => _pagination.goTo(page)),
-                  ),
-                ],
-              ),
+      master: ColoredBox(
+        color: _tableView ? Colors.white : Colors.transparent,
+        child: RefreshIndicator(
+          color: AppTheme.primaryColor,
+          onRefresh: _loadData,
+          child: filteredClients.isEmpty
+              ? ListView(children: [_buildEmptyState()])
+              : LayoutBuilder(
+                  builder: (context, constraints) {
+                    const minTableWidth = 1000.0;
+                    final tableWidth = constraints.maxWidth < minTableWidth &&
+                            _tableView
+                        ? minTableWidth
+                        : constraints.maxWidth;
+                    final table = Column(
+                      children: [
+                        if (_tableView)
+                          ClientTableHeader(
+                            isCallMode: isCallGestor,
+                            showDistance: !isCallGestor,
+                            showCierre: true,
+                          ),
+                        Expanded(
+                          child: Scrollbar(
+                            controller: _listScrollController,
+                            thumbVisibility: true,
+                            child: ListView.builder(
+                              controller: _listScrollController,
+                              physics: const AlwaysScrollableScrollPhysics(),
+                              cacheExtent: 600,
+                              addAutomaticKeepAlives: false,
+                              addRepaintBoundaries: true,
+                              addSemanticIndexes: false,
+                              itemCount: pageClients.length,
+                              itemBuilder: (context, index) =>
+                                  _buildClientListItem(
+                                pageClients[index],
+                                isCallGestor: isCallGestor,
+                                campanaFilterNotifier: campanaFilterNotifier,
+                                campanaFilter: campanaFilter,
+                                index: index,
+                                tableView: _tableView,
+                              ),
+                            ),
+                          ),
+                        ),
+                        ClientListPaginationBar(
+                          pagination: _pagination,
+                          compact: true,
+                          onPageChanged: (page) => setState(() {
+                            _pagination.goTo(page);
+                            _scrollListToTop();
+                          }),
+                        ),
+                      ],
+                    );
+                    if (tableWidth <= constraints.maxWidth) {
+                      return table;
+                    }
+                    return SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: SizedBox(width: tableWidth, child: table),
+                    );
+                  },
+                ),
+        ),
       ),
       detail: selectedClient == null
           ? null
@@ -618,38 +799,216 @@ class _DashboardScreenState extends State<DashboardScreen> {
               onUpdated: _reloadClients,
             ),
       emptyDetail: const MasterDetailEmptyPlaceholder(
-        subtitle: 'Elige una cuenta de la lista para gestionarla sin salir del panel.',
+        subtitle:
+            'Elige una cuenta de la lista para gestionarla sin salir del panel.',
       ),
     );
   }
 
-  Widget _buildTableHeader(bool isCallGestor) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      color: Colors.grey.shade100,
-      child: Row(
-        children: [
-          const Expanded(
-            flex: 3,
-            child: Text('Cliente', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 11)),
+  Widget _buildDesktopToolbar({
+    required bool isCallGestor,
+    required List<ClientModel> sectionClients,
+    required List<ClientModel> filteredClients,
+    required CampanaBancoFilterNotifier campanaFilterNotifier,
+    required String? campanaFilter,
+  }) {
+    final hasTags = _etiquetaCatalog.etiquetas.isNotEmpty;
+    final countLabel = _pagination.needsBar
+        ? '${filteredClients.length} · ${_pagination.page + 1}/${_pagination.totalPages}'
+        : '${filteredClients.length}';
+
+    return Material(
+      color: Theme.of(context).scaffoldBackgroundColor,
+      child: Container(
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(color: Colors.grey.shade200),
           ),
-          Expanded(
-            flex: 2,
-            child: Text(
-              isCallGestor ? 'Teléfono' : 'DNI',
-              style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 11),
+        ),
+        padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            final wide = constraints.maxWidth >= 1100;
+            final kpis = _buildDesktopKpis(
+              sectionClients,
+              isCallGestor: isCallGestor,
+            );
+            final extras = Padding(
+                    padding: const EdgeInsets.only(left: 10),
+                    child: TramoProgressBar(
+                      clients: sectionClients,
+                      compact: true,
+                      selectedTramos: _tramoFilter,
+                      onTramoTap: _toggleTramoFilter,
+                    ),
+                  );
+            final campaign = CampanaBancoFilterBar(
+              available: campanaFilterNotifier.available,
+              selected: campanaFilter,
+              onSelected: campanaFilterNotifier.select,
+              compact: true,
+            );
+            final count = Text(
+              countLabel,
+              style: TextStyle(
+                color: Colors.grey.shade600,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            );
+
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (wide)
+                  Row(
+                    children: [
+                      kpis,
+                      extras,
+                      const SizedBox(width: 12),
+                      Expanded(child: _buildSearchField(dense: true)),
+                      const SizedBox(width: 4),
+                      _buildCierreFilterButton(),
+                      const SizedBox(width: 4),
+                      campaign,
+                      const SizedBox(width: 10),
+                      count,
+                    ],
+                  )
+                else ...[
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        kpis,
+                        extras,
+                        const SizedBox(width: 12),
+                        count,
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(child: _buildSearchField(dense: true)),
+                      const SizedBox(width: 4),
+                      _buildCierreFilterButton(),
+                      const SizedBox(width: 4),
+                      campaign,
+                    ],
+                  ),
+                ],
+                if (_cierreFilter.isActive) ...[
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: _buildCierreActiveChip(),
+                  ),
+                ],
+                if (_tramoFilter.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: _buildTramoActiveChip(),
+                  ),
+                ],
+                if (hasTags) ...[
+                  const SizedBox(height: 8),
+                  _buildEtiquetaFilterRow(),
+                ],
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  void _selectStatusFilter(String value) {
+    setState(() {
+      _filter = (value != 'all' && _filter == value) ? 'all' : value;
+      _resetPagination();
+    });
+  }
+
+  void _toggleTramoFilter(int tramo) {
+    setState(() {
+      _tramoFilter = toggleExclusiveTramo(_tramoFilter, tramo);
+      _resetPagination();
+    });
+  }
+
+  Widget _buildDesktopKpis(
+    List<ClientModel> sectionClients, {
+    required bool isCallGestor,
+  }) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        StatChip(
+          label: isCallGestor ? 'Cartera' : 'Total',
+          value: '${_totalClients(sectionClients)}',
+          icon: Icons.people_outline,
+          color: AppTheme.primaryColor,
+          selected: _filter == 'all',
+          tooltip: 'Mostrar todas las cuentas',
+          onTap: () => _selectStatusFilter('all'),
+        ),
+        const SizedBox(width: 6),
+        StatChip(
+          label: 'Pendientes',
+          value: '${_pendientes(sectionClients)}',
+          icon: isCallGestor
+              ? Icons.phone_in_talk_outlined
+              : Icons.pending_outlined,
+          color: Colors.amber.shade700,
+          selected: _filter == 'pendiente',
+          tooltip: 'Filtrar pendientes',
+          onTap: () => _selectStatusFilter('pendiente'),
+        ),
+        const SizedBox(width: 6),
+        StatChip(
+          label: isCallGestor ? 'Contactados' : 'Visitados',
+          value: '${_visitados(sectionClients)}',
+          icon: Icons.check_circle_outline,
+          color: Colors.green.shade600,
+          selected: _filter == 'visitado',
+          tooltip: isCallGestor
+              ? 'Filtrar contactados'
+              : 'Filtrar visitados',
+          onTap: () => _selectStatusFilter('visitado'),
+        ),
+        const SizedBox(width: 6),
+        if (isCallGestor)
+          StatChip(
+            label: 'Promesas',
+            value: '${_promesas(sectionClients)}',
+            icon: Icons.event_available_outlined,
+            color: AppTheme.accentColor,
+            selected: _filter == 'promesa',
+            tooltip: 'Filtrar promesas',
+            onTap: () => _selectStatusFilter('promesa'),
+          )
+        else
+          StatChip(
+            label: 'Avance',
+            value: '${_avance(sectionClients).toStringAsFixed(0)}%',
+            icon: Icons.trending_up,
+            color: AppTheme.accentColor,
+          ),
+        if (isCallGestor) ...[
+          const SizedBox(width: 8),
+          Text(
+            'S/ ${_montoCartera(sectionClients).toStringAsFixed(0)}',
+            style: const TextStyle(
+              fontWeight: FontWeight.w700,
+              fontSize: 13,
+              color: AppTheme.primaryColor,
             ),
           ),
-          const Expanded(
-            child: Text('Deuda', textAlign: TextAlign.end, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 11)),
-          ),
-          const SizedBox(width: 8),
-          const SizedBox(
-            width: 88,
-            child: Text('Estado', textAlign: TextAlign.end, style: TextStyle(fontWeight: FontWeight.w700, fontSize: 11)),
-          ),
         ],
-      ),
+      ],
     );
   }
 
@@ -662,13 +1021,17 @@ class _DashboardScreenState extends State<DashboardScreen> {
     bool tableView = false,
   }) {
     final isSelected = _selectedClientId == client.id;
-    final onTap = () => _openClientDetail(client);
+    void onTap() => _openClientDetail(client);
 
     if (tableView) {
       return ClientDataRow(
         client: client,
         isCallMode: isCallGestor,
         isSelected: isSelected,
+        showCampana: true,
+        showCierre: true,
+        duracionDias: _duracionDias,
+        etiquetaCatalog: _etiquetaCatalog,
         distanceLabel: isCallGestor
             ? null
             : distanceLabelForClient(client, _sortOriginLat, _sortOriginLng),
@@ -677,24 +1040,19 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
 
     return ClientListTile(
+      key: ValueKey(client.id),
       client: client,
       isCallMode: isCallGestor,
       isSelected: isSelected,
+      dense: context.isExpanded,
       showChevron: !context.isExpanded,
+      duracionDias: _duracionDias,
       etiquetaCatalog: _etiquetaCatalog,
-      showCampanaBadge:
-          campanaFilterNotifier.showFilterBar && campanaFilter == null,
       distanceLabel: isCallGestor
           ? null
           : distanceLabelForClient(client, _sortOriginLat, _sortOriginLng),
       onTap: onTap,
-    )
-        .animate()
-        .fadeIn(
-          delay: Duration(milliseconds: (index * 30).clamp(0, 300)),
-          duration: 300.ms,
-        )
-        .slideX(begin: 0.05, end: 0, duration: 300.ms);
+    );
   }
 
   Widget _buildCallCenterBanner(List<ClientModel> sectionClients) {
@@ -720,7 +1078,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 const Text(
-                  'Gestión telefónica · Tramo 1',
+                  'Gestión telefónica',
                   style: TextStyle(
                     fontWeight: FontWeight.w600,
                     fontSize: 13,
@@ -839,60 +1197,59 @@ class _DashboardScreenState extends State<DashboardScreen> {
       padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
       child: Column(
         children: [
-          // Search bar
-          TextField(
-            controller: _searchController,
-            decoration: InputDecoration(
-              hintText: _isCallGestor
-                  ? 'Buscar por nombre, DNI, teléfono...'
-                  : 'Buscar por nombre, DNI, código...',
-              prefixIcon: const Icon(Icons.search, size: 20),
-              suffixIcon: _searchQuery.isNotEmpty
-                  ? IconButton(
-                      icon: const Icon(Icons.clear, size: 18),
-                      onPressed: () {
-                        _searchController.clear();
-                        setState(() {
-                          _searchQuery = '';
-                          _resetPagination();
-                        });
-                      },
-                    )
-                  : null,
-              contentPadding:
-                  const EdgeInsets.symmetric(vertical: 0, horizontal: 16),
-              filled: true,
-              fillColor: Colors.grey.shade50,
-            ),
-            onChanged: (v) => setState(() {
-              _searchQuery = v;
-              _resetPagination();
-            }),
-          ),
-
-          const SizedBox(height: 10),
-
-          // Filter tabs
           Row(
             children: [
-              _buildFilterChip('all', 'Todos', Icons.list),
+              Expanded(child: _buildSearchField()),
               const SizedBox(width: 8),
-              _buildFilterChip(
-                  'pendiente', 'Pendientes', Icons.pending_outlined),
+              _buildCierreFilterButton(),
+            ],
+          ),
+          if (_cierreFilter.isActive) ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: _buildCierreActiveChip(),
+            ),
+          ],
+          if (_tramoFilter.isNotEmpty) ...[
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: _buildTramoActiveChip(),
+            ),
+          ],
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Expanded(
+                child: SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: Row(
+                    children: [
+                      _buildFilterChip('all', 'Todos', Icons.list),
+                      const SizedBox(width: 8),
+                      _buildFilterChip(
+                          'pendiente', 'Pendientes', Icons.pending_outlined),
+                      const SizedBox(width: 8),
+                      _buildFilterChip(
+                          'visitado',
+                          _isCallGestor ? 'Contactados' : 'Visitados',
+                          Icons.check_circle_outline),
+                      if (_isCallGestor) ...[
+                        const SizedBox(width: 8),
+                        _buildFilterChip('promesa', 'Promesas',
+                            Icons.event_available_outlined),
+                      ],
+                      const SizedBox(width: 12),
+                      _buildTramoQuickChips(),
+                    ],
+                  ),
+                ),
+              ),
               const SizedBox(width: 8),
-              _buildFilterChip(
-                  'visitado',
-                  _isCallGestor ? 'Contactados' : 'Visitados',
-                  Icons.check_circle_outline),
-              if (_isCallGestor) ...[
-                const SizedBox(width: 8),
-                _buildFilterChip(
-                    'promesa', 'Promesas', Icons.event_available_outlined),
-              ],
-              const Spacer(),
               Text(
                 _pagination.needsBar
-                    ? '${filteredClients.length} clientes · pág. ${_pagination.page + 1}/${_pagination.totalPages}'
+                    ? '${filteredClients.length} · pág. ${_pagination.page + 1}/${_pagination.totalPages}'
                     : '${filteredClients.length} clientes',
                 style: TextStyle(
                   color: Colors.grey.shade500,
@@ -901,38 +1258,250 @@ class _DashboardScreenState extends State<DashboardScreen> {
               ),
             ],
           ),
-
           if (_etiquetaCatalog.etiquetas.isNotEmpty) ...[
             const SizedBox(height: 8),
-            SizedBox(
-              height: 34,
-              child: ListView(
-                scrollDirection: Axis.horizontal,
-                children: _etiquetaCatalog.etiquetas.map((tag) {
-                  final active = _etiquetaFilter.contains(tag.id);
-                  return Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: FilterChip(
-                      label: Text(tag.nombre, style: const TextStyle(fontSize: 11)),
-                      selected: active,
-                      selectedColor: tag.color.withValues(alpha: 0.25),
-                      checkmarkColor: tag.color,
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (v) => setState(() {
-                        if (v) {
-                          _etiquetaFilter.add(tag.id);
-                        } else {
-                          _etiquetaFilter.remove(tag.id);
-                        }
-                        _resetPagination();
-                      }),
-                    ),
-                  );
-                }).toList(),
-              ),
-            ),
+            _buildEtiquetaFilterRow(),
           ],
+          const SizedBox(height: 8),
+          _buildSemaforoFilterRow(),
         ],
+      ),
+    );
+  }
+
+  Widget _buildCierreFilterButton() {
+    final active = _cierreFilter.isActive;
+    final icon = Icon(
+      Icons.event_available_outlined,
+      size: 20,
+      color: active ? AppTheme.primaryColor : Colors.grey.shade700,
+    );
+    return IconButton(
+      tooltip: 'Filtro de cierre',
+      onPressed: _openCierreFilter,
+      icon: active
+          ? Badge(
+              smallSize: 8,
+              backgroundColor: AppTheme.primaryColor,
+              child: icon,
+            )
+          : icon,
+    );
+  }
+
+  Widget _buildCierreActiveChip() {
+    return InputChip(
+      avatar: const Icon(Icons.event_available_outlined, size: 16),
+      label: Text(
+        cierreFilterLabel(_cierreFilter),
+        style: const TextStyle(fontSize: 12),
+      ),
+      onDeleted: () => setState(() {
+        _cierreFilter = CierreFilter.none;
+        _resetPagination();
+      }),
+      deleteIconColor: AppTheme.primaryColor,
+      visualDensity: VisualDensity.compact,
+      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      onPressed: _openCierreFilter,
+    );
+  }
+
+  Widget _buildTramoActiveChip() {
+    final label = _tramoFilter.isEmpty
+        ? 'Etapa'
+        : tramoLabel(_tramoFilter.first);
+    return InputChip(
+      avatar: const Icon(Icons.filter_alt_outlined, size: 16),
+      label: Text(
+        'Etapa $label',
+        style: const TextStyle(fontSize: 12),
+      ),
+      onDeleted: () => setState(() {
+        _tramoFilter = {};
+        _resetPagination();
+      }),
+    );
+  }
+
+  Widget _buildTramoQuickChips() {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final tramo in tramoFilterOptions) ...[
+          if (tramo != tramoFilterOptions.first) const SizedBox(width: 8),
+          _buildTramoChip(tramo),
+        ],
+      ],
+    );
+  }
+
+  Widget _buildTramoChip(int tramo) {
+    final label = tramoLabel(tramo);
+    final isActive = _tramoFilter.contains(tramo);
+    return Semantics(
+      button: true,
+      selected: isActive,
+      label: isActive ? 'Quitar filtro $label' : 'Filtrar por etapa $label',
+      child: GestureDetector(
+        key: ValueKey('tramo-quick-$label'),
+        onTap: () => _toggleTramoFilter(tramo),
+        child: AnimatedContainer(
+          duration: 200.ms,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: isActive ? AppTheme.primaryColor : Colors.grey.shade100,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: isActive ? AppTheme.primaryColor : Colors.grey.shade300,
+            ),
+          ),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: isActive ? Colors.white : Colors.grey.shade700,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openCierreFilter() async {
+    final result = await showCierreFilterSheet(
+      context: context,
+      initial: _cierreFilter,
+    );
+    if (!mounted || result == null) return;
+    setState(() {
+      _cierreFilter = result;
+      _resetPagination();
+    });
+  }
+
+  Widget _buildSearchField({bool dense = false}) {
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: _searchController,
+      builder: (context, value, _) {
+        return TextField(
+          controller: _searchController,
+          textInputAction: TextInputAction.search,
+          decoration: InputDecoration(
+            hintText: _isCallGestor
+                ? 'Buscar por nombre, DNI, teléfono...'
+                : 'Buscar por nombre, DNI, código...',
+            prefixIcon: const Icon(Icons.search, size: 20),
+            suffixIcon: value.text.isNotEmpty
+                ? IconButton(
+                    icon: const Icon(Icons.clear, size: 18),
+                    onPressed: () {
+                      _searchDebounce?.cancel();
+                      _searchController.clear();
+                      setState(() {
+                        _searchQuery = '';
+                        _resetPagination();
+                      });
+                    },
+                  )
+                : null,
+            isDense: dense,
+            contentPadding: EdgeInsets.symmetric(
+              vertical: dense ? 10 : 0,
+              horizontal: 16,
+            ),
+            filled: true,
+            fillColor: Colors.grey.shade50,
+          ),
+          // Debounce: evita refiltrar miles de clientes en cada tecla.
+          onChanged: _onSearchChangedDebounced,
+        );
+      },
+    );
+  }
+
+  Widget _buildEtiquetaFilterRow() {
+    return SizedBox(
+      height: 34,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        children: _etiquetaCatalog.etiquetas.map((tag) {
+          final active = _etiquetaFilter.contains(tag.id);
+          return Padding(
+            padding: const EdgeInsets.only(right: 8),
+            child: FilterChip(
+              label: Text(tag.nombre, style: const TextStyle(fontSize: 11)),
+              selected: active,
+              selectedColor: tag.color.withValues(alpha: 0.25),
+              checkmarkColor: tag.color,
+              visualDensity: VisualDensity.compact,
+              onSelected: (v) => setState(() {
+                if (v) {
+                  _etiquetaFilter.add(tag.id);
+                } else {
+                  _etiquetaFilter.remove(tag.id);
+                }
+                _resetPagination();
+              }),
+            ),
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildSemaforoFilterRow() {
+    final chips = <Widget>[
+      Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: FilterChip(
+          avatar: const CircleAvatar(
+            backgroundColor: Color(0xFF94A3B8),
+            radius: 6,
+          ),
+          label: const Text('Sin clasificar', style: TextStyle(fontSize: 11)),
+          selected: _semaforoFilter.contains(kSemaforoSinClasificar),
+          selectedColor: const Color(0xFF94A3B8).withValues(alpha: 0.25),
+          visualDensity: VisualDensity.compact,
+          onSelected: (v) => setState(() {
+            if (v) {
+              _semaforoFilter.add(kSemaforoSinClasificar);
+            } else {
+              _semaforoFilter.remove(kSemaforoSinClasificar);
+            }
+            _resetPagination();
+          }),
+        ),
+      ),
+      ...kSemaforoNiveles.map((n) {
+        final active = _semaforoFilter.contains(n.id);
+        return Padding(
+          padding: const EdgeInsets.only(right: 8),
+          child: FilterChip(
+            avatar: CircleAvatar(backgroundColor: n.color, radius: 6),
+            label: Text(n.label, style: const TextStyle(fontSize: 11)),
+            selected: active,
+            selectedColor: n.color.withValues(alpha: 0.25),
+            checkmarkColor: n.color,
+            visualDensity: VisualDensity.compact,
+            onSelected: (v) => setState(() {
+              if (v) {
+                _semaforoFilter.add(n.id);
+              } else {
+                _semaforoFilter.remove(n.id);
+              }
+              _resetPagination();
+            }),
+          ),
+        );
+      }),
+    ];
+    return SizedBox(
+      height: 34,
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        children: chips,
       ),
     );
   }
@@ -982,6 +1551,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildEmptyState() {
+    final cierreActive = _cierreFilter.isActive;
+    final tramoActive = _tramoFilter.isNotEmpty;
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -991,12 +1562,37 @@ class _DashboardScreenState extends State<DashboardScreen> {
           Text(
             _searchQuery.isNotEmpty
                 ? 'No se encontraron resultados'
-                : 'No hay clientes para mostrar',
+                : cierreActive
+                    ? 'Ningún cliente cierra en ese plazo'
+                    : tramoActive
+                        ? 'Ningún cliente en ${tramoLabel(_tramoFilter.first)}'
+                        : 'No hay clientes para mostrar',
             style: TextStyle(
               color: Colors.grey.shade500,
               fontSize: 16,
             ),
+            textAlign: TextAlign.center,
           ),
+          if (cierreActive) ...[
+            const SizedBox(height: 12),
+            TextButton(
+              onPressed: () => setState(() {
+                _cierreFilter = CierreFilter.none;
+                _resetPagination();
+              }),
+              child: const Text('Limpiar filtro de cierre'),
+            ),
+          ],
+          if (tramoActive) ...[
+            const SizedBox(height: 12),
+            TextButton(
+              onPressed: () => setState(() {
+                _tramoFilter = {};
+                _resetPagination();
+              }),
+              child: const Text('Ver todas las etapas'),
+            ),
+          ],
         ],
       ),
     );

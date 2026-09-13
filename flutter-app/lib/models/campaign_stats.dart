@@ -145,6 +145,8 @@ class CampaignStats {
     'fallecido_inubicable',
     'suplantacion',
     'pago_no_registrado',
+    'no_hizo_pedido',
+    'completo_pedido_socia',
   ];
 
   static const statusLabels = {
@@ -154,5 +156,7 @@ class CampaignStats {
     'fallecido_inubicable': 'Inubicable',
     'suplantacion': 'Suplantación',
     'pago_no_registrado': 'Pago No Reg.',
+    'no_hizo_pedido': 'No hizo pedido',
+    'completo_pedido_socia': 'Pedido socia',
   };
 }

@@ -1,10 +1,15 @@
 import '../models/user_model.dart';
 
 /// Claves de sección Firestore (`gestores/{id}`) para un perfil de gestor.
-/// Prioriza el array [UserModel.secciones] y construye la clave compuesta
-/// `region_zona_seccion` cuando existen los tres campos legacy.
+/// Call center siempre usa `_CALL_{uid}` (ignora secciones territoriales
+/// residuales o el array vacío). Campo prioriza [UserModel.secciones] y
+/// construye `region_zona_seccion` con los campos legacy.
 List<String> resolveGestorSectionKeys(UserModel? profile) {
   if (profile == null) return [];
+
+  if (profile.isCallGestor && profile.uid.isNotEmpty) {
+    return [callSectionKeyForUid(profile.uid)];
+  }
 
   final keys = <String>{};
   for (final raw in profile.secciones) {
